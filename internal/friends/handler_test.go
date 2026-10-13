@@ -300,18 +300,19 @@ func TestLimits(t *testing.T) {
 	fill(maxPending, `INSERT INTO friendships (requester_id, addressee_id, status) SELECT id, $2, 'pending' FROM x`, b)
 	e.want(c, "POST", "/v1/friends/requests", `{"code":"`+b.code+`"}`, 429, "rate_limited")
 
-	// 500 amigos de C: aceitar mais um (direto ou cruzado) é recusado
+	// pedidos pendentes com C criados antes de ele chegar a 500 amigos
+	d, h, k, f, g := e.user(), e.user(), e.user(), e.user(), e.user()
+	fromD := e.request(d, c)["id"].(string)
+	e.request(c, h)
+	toK := e.request(c, k)["id"].(string)
 	fill(maxFriends, `INSERT INTO friendships (requester_id, addressee_id, status) SELECT id, $2, 'accepted' FROM x`, c)
-	d, f := e.user(), e.user()
-	id := e.request(d, c)["id"].(string)
-	e.want(c, "POST", "/v1/friends/requests/"+id+"/accept", "", 429, "rate_limited")
-	e.request(c, f) // pedido de C ainda vale (não é amizade)
-	e.want(f, "POST", "/v1/friends/requests", `{"code":"`+c.code+`"}`, 429, "rate_limited")
 
-	// o teto de amigos também vale para o outro lado
-	e.want(d, "DELETE", "/v1/friends/"+c.id, "", 204, "")
-	id = e.request(c, d)["id"].(string)
-	e.want(d, "POST", "/v1/friends/requests/"+id+"/accept", "", 429, "rate_limited")
+	// 500 amigos de C: nenhuma amizade nova, por nenhum caminho
+	e.want(c, "POST", "/v1/friends/requests/"+fromD+"/accept", "", 429, "rate_limited")     // C aceita
+	e.want(k, "POST", "/v1/friends/requests/"+toK+"/accept", "", 429, "rate_limited")       // aceitam o de C
+	e.want(h, "POST", "/v1/friends/requests", `{"code":"`+c.code+`"}`, 429, "rate_limited") // cruzado
+	e.want(c, "POST", "/v1/friends/requests", `{"code":"`+f.code+`"}`, 429, "rate_limited") // C pede
+	e.want(g, "POST", "/v1/friends/requests", `{"code":"`+c.code+`"}`, 429, "rate_limited") // pedem a C
 }
 
 // Pior caso dentro dos tetos: a resposta cabe no limite de leitura do app (64 KiB).

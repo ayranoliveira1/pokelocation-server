@@ -5,9 +5,14 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type userKey struct{}
@@ -47,4 +52,18 @@ func Decode(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 		return false
 	}
 	return true
+}
+
+// DBError responde um erro do banco que não é regra de negócio: resposta do Postgres (bug nosso) → 500 internal;
+// o resto (conexão caiu, pool fechado, timeout) → 503 unavailable. Loga só o SQLSTATE ou o tipo do erro: mensagens
+// do Postgres podem ecoar entrada do usuário.
+func DBError(w http.ResponseWriter, pkg string, err error) {
+	var pg *pgconn.PgError
+	if errors.As(err, &pg) {
+		slog.Error(pkg+": sql", "sqlstate", pg.Code)
+		Error(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	slog.Warn(pkg+": banco indisponível", "err_type", fmt.Sprintf("%T", err))
+	Error(w, http.StatusServiceUnavailable, "unavailable")
 }

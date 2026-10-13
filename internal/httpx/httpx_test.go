@@ -1,9 +1,13 @@
 package httpx
 
 import (
+	"context"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestDecode(t *testing.T) {
@@ -23,6 +27,19 @@ func TestDecode(t *testing.T) {
 		}
 		if !got && (w.Code != 400 || !strings.Contains(w.Body.String(), `"error":"bad_request"`)) {
 			t.Errorf("%q: resposta %d %s", body, w.Code, w.Body)
+		}
+	}
+}
+
+func TestDBError(t *testing.T) {
+	for err, want := range map[error]int{
+		fmt.Errorf("x: %w", &pgconn.PgError{Code: "23505", Message: "segredo@x"}): 500,
+		context.DeadlineExceeded: 503,
+	} {
+		w := httptest.NewRecorder()
+		DBError(w, "t", err)
+		if w.Code != want || strings.Contains(w.Body.String(), "segredo") {
+			t.Errorf("%v: %d %s", err, w.Code, w.Body)
 		}
 	}
 }

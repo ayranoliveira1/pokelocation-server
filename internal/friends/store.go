@@ -73,6 +73,9 @@ func (s *Store) request(ctx context.Context, me, to string) (id, status string, 
 		if out >= maxPending || in >= maxPending {
 			return ErrLimit
 		}
+		if err := friendsRoom(ctx, tx, me, to); err != nil { // pedido que nunca poderia ser aceito
+			return err
+		}
 		status, created = "pending", true
 		return tx.QueryRow(ctx, `INSERT INTO friendships (requester_id, addressee_id, status)
 			VALUES ($1, $2, 'pending') RETURNING id`, me, to).Scan(&id)
@@ -81,9 +84,18 @@ func (s *Store) request(ctx context.Context, me, to string) (id, status string, 
 }
 
 // acceptLocked vira o pedido id (entre a e b, já travado) em amizade, se nenhum dos dois estiver no teto.
-// ponytail: o teto é checado sem travar os outros pares de a e b; dois aceites simultâneos podem passar de 500 por 1.
-// Trava por usuário se o teto virar regra dura.
 func acceptLocked(ctx context.Context, tx pgx.Tx, id, a, b string) error {
+	if err := friendsRoom(ctx, tx, a, b); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE friendships SET status = 'accepted' WHERE id = $1`, id)
+	return err
+}
+
+// friendsRoom: ErrLimit se a ou b já tem maxFriends amigos.
+// ponytail: conta sem travar os outros pares de a e b; dois aceites simultâneos podem passar de 500 por 1.
+// Trava por usuário se o teto virar regra dura.
+func friendsRoom(ctx context.Context, tx pgx.Tx, a, b string) error {
 	var na, nb int
 	if err := tx.QueryRow(ctx, `SELECT
 		count(*) FILTER (WHERE requester_id = $1 OR addressee_id = $1),
@@ -95,8 +107,7 @@ func acceptLocked(ctx context.Context, tx pgx.Tx, id, a, b string) error {
 	if na >= maxFriends || nb >= maxFriends {
 		return ErrLimit
 	}
-	_, err := tx.Exec(ctx, `UPDATE friendships SET status = 'accepted' WHERE id = $1`, id)
-	return err
+	return nil
 }
 
 // accept: só o destinatário de um pedido pendente.

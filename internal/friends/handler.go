@@ -2,12 +2,9 @@ package friends
 
 import (
 	"errors"
-	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ayranoliveira1/pokelocation-server/internal/httpx"
@@ -96,10 +93,8 @@ func done(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// fail traduz o erro para o código do contrato. Log só com o SQLSTATE ou o tipo da falha de conexão: mensagens do
-// Postgres podem ecoar entrada do usuário.
+// fail traduz o erro para o código do contrato; o resto (banco) vai para httpx.DBError.
 func fail(w http.ResponseWriter, err error) {
-	var pg *pgconn.PgError
 	switch {
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "not_found")
@@ -115,11 +110,7 @@ func fail(w http.ResponseWriter, err error) {
 		httpx.Error(w, http.StatusForbidden, "blocked")
 	case errors.Is(err, ErrLimit):
 		httpx.Error(w, http.StatusTooManyRequests, "rate_limited")
-	case errors.As(err, &pg):
-		slog.Error("friends: sql", "sqlstate", pg.Code)
-		httpx.Error(w, http.StatusInternalServerError, "internal")
-	default: // não é resposta do Postgres: conexão caiu, pool fechado, timeout
-		slog.Warn("friends: banco indisponível", "err_type", fmt.Sprintf("%T", err))
-		httpx.Error(w, http.StatusServiceUnavailable, "unavailable")
+	default:
+		httpx.DBError(w, "friends", err)
 	}
 }
