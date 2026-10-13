@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,22 +14,38 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
+	"github.com/ayranoliveira1/pokelocation-server/internal/auth"
 	"github.com/ayranoliveira1/pokelocation-server/internal/db"
+	"github.com/ayranoliveira1/pokelocation-server/internal/friends"
+	"github.com/ayranoliveira1/pokelocation-server/internal/keys"
 )
 
 type config struct {
-	addr        string
-	databaseURL string
+	addr, databaseURL, redisURL string
+	auth                        auth.Config
 }
 
 func loadConfig() (config, error) {
-	c := config{addr: os.Getenv("ADDR"), databaseURL: os.Getenv("DATABASE_URL")}
+	c := config{
+		addr:        os.Getenv("ADDR"),
+		databaseURL: os.Getenv("DATABASE_URL"),
+		redisURL:    os.Getenv("REDIS_URL"),
+		auth: auth.Config{
+			SigningKey:         os.Getenv("AUTH_SIGNING_KEY"),
+			GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+			GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+			PublicURL:          os.Getenv("PUBLIC_URL"),
+		},
+	}
 	if c.addr == "" {
 		c.addr = ":8080"
 	}
-	if c.databaseURL == "" {
-		return c, errors.New("DATABASE_URL obrigatória")
+	for name, v := range map[string]string{"DATABASE_URL": c.databaseURL, "REDIS_URL": c.redisURL, "AUTH_SIGNING_KEY": c.auth.SigningKey} {
+		if v == "" {
+			return c, errors.New(name + " obrigatória")
+		}
 	}
 	return c, nil
 }
@@ -58,8 +75,24 @@ func run() error {
 		return err
 	}
 
+	ropt, err := redis.ParseURL(cfg.redisURL)
+	if err != nil {
+		return errors.New("REDIS_URL inválida") // sem o err: a URL pode ter senha
+	}
+	rdb := redis.NewClient(ropt)
+	defer rdb.Close()
+
+	authH, err := auth.New(cfg.auth, pool, rdb)
+	if err != nil {
+		return err
+	}
+	go daily(ctx, "auth: limpeza dos refresh", authH.Cleanup)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz(pool))
+	authH.Routes(mux, authH.Authed)
+	friends.New(pool).Routes(mux, authH.Authed)
+	keys.New(pool).Routes(mux, authH.Authed)
 
 	srv := &http.Server{
 		Addr:              cfg.addr,
@@ -92,5 +125,21 @@ func healthz(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		_, _ = w.Write([]byte("ok"))
+	}
+}
+
+// daily roda f na subida e depois a cada 24 h, até ctx acabar. Erro só vai para o log.
+func daily(ctx context.Context, name string, f func(context.Context) error) {
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		if err := f(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn(name, "err_type", fmt.Sprintf("%T", err))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
 }

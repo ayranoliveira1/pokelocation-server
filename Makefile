@@ -2,7 +2,7 @@ FUZZTIME ?= 60s
 -include .env
 export
 
-.PHONY: test fuzz lint run
+.PHONY: test fuzz lint run ca
 
 test:
 	go test -race ./...
@@ -27,3 +27,8 @@ run:
 	DATABASE_URL=postgres://pokelocation:$(POSTGRES_PASSWORD)@127.0.0.1:$${PG_PORT:-5432}/pokelocation?sslmode=disable \
 	REDIS_URL=redis://127.0.0.1:$${REDIS_PORT:-6379}/0 \
 	go run ./cmd/server
+
+# CA local do Caddy (tls internal, SITE_ADDRESS=localhost): instale SÓ no emulador. Não vai para o git.
+ca:
+	docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt caddy-local-root.crt
+	@openssl x509 -in caddy-local-root.crt -noout -subject -enddate
