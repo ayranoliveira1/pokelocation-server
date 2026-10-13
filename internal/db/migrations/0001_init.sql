@@ -7,8 +7,8 @@ CREATE TABLE users (
     google_sub    text UNIQUE,
     friend_code   text NOT NULL UNIQUE CHECK (friend_code ~ '^[0-9A-HJKMNP-TV-Z]{8}$'), -- Crockford base32
     created_at    timestamptz NOT NULL DEFAULT now(),
-    -- access token com iat anterior é recusado (logout, reuso de refresh, vínculo Google). Truncado ao segundo, como o iat.
-    tokens_valid_after timestamptz NOT NULL DEFAULT date_trunc('second', now()),
+    -- vai no access (claim tv); logout, reuso de refresh e vínculo Google incrementam: tv diferente → 401. Sem relógio.
+    token_version integer NOT NULL DEFAULT 0,
     CHECK (email IS NOT NULL OR google_sub IS NOT NULL),
     CHECK (password_hash IS NULL OR email IS NOT NULL)
 );
