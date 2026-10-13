@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 }
 
 type server struct {
-	t       *testing.T
+	t       testing.TB
 	base    string
 	key     ed25519.PrivateKey
 	pool    *pgxpool.Pool // banco do teste, para semear o que a API não deixa criar rápido (tetos)
@@ -63,12 +63,21 @@ type server struct {
 
 var ipSeq atomic.Int32
 
-// start sobe o servidor com banco e Redis só deste teste (e marca o teste como paralelo). Para no fim do teste e confere que o log não vazou nada de
-// s.secret(…).
-func start(t *testing.T) *server {
+// start sobe o servidor com banco e Redis só deste teste (e marca o teste como paralelo). Para no fim do teste e
+// confere que o log não vazou nada de s.secret(…).
+func start(t testing.TB) *server {
 	t.Helper()
-	t.Parallel()
-	pool, rdb := testdb.Pool(t), testdb.Redis(t)
+	if tt, ok := t.(*testing.T); ok {
+		tt.Parallel()
+	}
+	rdb := testdb.Redis(t)
+	return startWith(t, fmt.Sprintf("redis://%s/%d", rdb.Options().Addr, rdb.Options().DB))
+}
+
+// startWith: como start, com o Redis dado (ex.: testdb.StoppableRedis). Não marca paralelo.
+func startWith(t testing.TB, redisURL string) *server {
+	t.Helper()
+	pool := testdb.Pool(t)
 	buildOnce.Do(func() {
 		args := []string{"build", "-o", binPath}
 		if raceOn {
@@ -90,7 +99,7 @@ func start(t *testing.T) *server {
 	cmd.Env = append(os.Environ(),
 		"ADDR="+addr,
 		"DATABASE_URL="+pool.Config().ConnString(),
-		fmt.Sprintf("REDIS_URL=redis://%s/%d", rdb.Options().Addr, rdb.Options().DB),
+		"REDIS_URL="+redisURL,
 		envJWTKey+"="+base64.StdEncoding.EncodeToString(key.Seed()),
 	)
 	cmd.Stdout, cmd.Stderr = s.logs, s.logs
@@ -311,7 +320,7 @@ func (s *server) bucket(what string, budget int, every time.Duration, since time
 	s.t.Errorf("%s: nenhum 429 em %d chamadas", what, budget+30)
 }
 
-func freeAddr(t *testing.T) string {
+func freeAddr(t testing.TB) string {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

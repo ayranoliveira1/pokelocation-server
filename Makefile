@@ -7,11 +7,12 @@ export
 test:
 	tools/gtest.sh -race ./...
 
-# Cada FuzzXxx de cada pacote por $(FUZZTIME).
+# Cada FuzzXxx de cada pacote por $(FUZZTIME), pela trava do gtest e com 1 worker: o FuzzREST sobe um servidor e
+# containers por worker. Minimização curta: o servidor é outro processo, minimizar só gasta tempo. Máquina ociosa.
 fuzz:
 	@for pkg in $$(go list ./...); do \
 		for f in $$(go test -list '^Fuzz' $$pkg | grep '^Fuzz'); do \
-			go test -run '^$$' -fuzz "^$$f$$" -fuzztime $(FUZZTIME) $$pkg || exit 1; \
+			tools/gtest.sh -run '^$$' -fuzz "^$$f$$" -fuzztime $(FUZZTIME) -parallel 1 -fuzzminimizetime 1x $$pkg || exit 1; \
 		done; \
 	done
 

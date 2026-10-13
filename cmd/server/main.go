@@ -20,6 +20,9 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/db"
 	"github.com/ayranoliveira1/pokelocation-server/internal/friends"
 	"github.com/ayranoliveira1/pokelocation-server/internal/keys"
+	"github.com/ayranoliveira1/pokelocation-server/internal/location"
+	"github.com/ayranoliveira1/pokelocation-server/internal/relay"
+	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
 
 type config struct {
@@ -86,13 +89,28 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	var loc *location.Service // relay → location só por callback (location importa relay)
+	hub := relay.New(pool, authH.Verify, func(c *relay.Conn, f wire.Frame) { loc.OnFrame(c, f) })
+	loc = location.New(rdb, pool, hub)
+
+	// amizade mudou → listas em memória dos dois lados; revogação → derruba os WS na hora
+	reload := func(a, b string) { hub.ReloadFriends(a); hub.ReloadFriends(b) }
+	authH.OnFriendsChange = reload
+	authH.OnRevoke = hub.Kick
+	fh := friends.New(pool)
+	fh.OnChange = reload
+
 	go daily(ctx, "auth: limpeza dos refresh", authH.Cleanup)
+	go daily(ctx, "relay: envelopes > 30 dias", hub.Cleanup)
+	go loc.Run(ctx)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz(pool))
 	authH.Routes(mux, authH.Authed)
-	friends.New(pool).Routes(mux, authH.Authed)
+	fh.Routes(mux, authH.Authed)
 	keys.New(pool).Routes(mux, authH.Authed)
+	hub.Routes(mux, authH.Authed)
+	loc.Routes(mux, authH.Authed)
 
 	srv := &http.Server{
 		Addr:              cfg.addr,
