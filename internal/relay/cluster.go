@@ -170,12 +170,11 @@ func (c *cluster) confirmed(s *redis.Subscription) {
 	if !ok {
 		return
 	}
+	if s.Kind != "subscribe" {
+		return // ready sai no syncLoop, na decisão de cancelar (antes do UNSUBSCRIBE)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if s.Kind != "subscribe" {
-		delete(c.ready, user)
-		return
-	}
 	c.ready[user] = struct{}{}
 	for _, w := range c.waits[user] {
 		close(w)
@@ -261,6 +260,10 @@ func (c *cluster) syncLoop(ctx context.Context) {
 			case !on && has:
 				delete(c.subs, u)
 				unsub = append(unsub, "u:"+u)
+				// já aqui: numa reconexão rápida, o Auth novo espera o SUBSCRIBE que vem depois deste UNSUBSCRIBE
+				c.mu.Lock()
+				delete(c.ready, u)
+				c.mu.Unlock()
 			}
 		}
 		// erro de rede: o go-redis guarda os canais e reassina ao reconectar; loga só a transição
