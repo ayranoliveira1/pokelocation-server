@@ -13,7 +13,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -704,5 +706,73 @@ func TestRotationDuringRevoke(t *testing.T) {
 	}
 	if c := <-codes; c != 401 {
 		t.Fatalf("refresh durante a revogação: %d", c)
+	}
+}
+
+// Hooks para o relay (o main liga OnRevoke → hub.Kick e OnFriendsChange → hub.ReloadFriends dos dois).
+func TestHooks(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.h.svc.google = fakeGoogle
+	var mu sync.Mutex
+	var got []string
+	e.h.OnRevoke = func(u string) { mu.Lock(); got = append(got, "revoke "+u); mu.Unlock() }
+	e.h.OnFriendsChange = func(a, b string) { mu.Lock(); got = append(got, "friends "+a+" "+b); mu.Unlock() }
+	take := func() []string { mu.Lock(); defer mu.Unlock(); g := got; got = nil; return g }
+
+	// logout
+	r := e.register("hk1@ex.com")
+	id := e.me(r.Access).ID
+	b, _ := json.Marshal(map[string]string{"refresh_token": r.Refresh})
+	e.post("/v1/auth/logout", string(b))
+	if g := take(); len(g) != 1 || g[0] != "revoke "+id {
+		t.Fatalf("logout: %v", g)
+	}
+	e.post("/v1/auth/logout", string(b)) // token já revogado: nada
+	if g := take(); len(g) != 0 {
+		t.Fatalf("logout repetido: %v", g)
+	}
+
+	// reuso
+	r = e.register("hk2@ex.com")
+	id = e.me(r.Access).ID
+	e.refreshCode(r.Refresh)
+	e.refreshCode(r.Refresh)
+	if g := take(); len(g) != 1 || g[0] != "revoke "+id {
+		t.Fatalf("reuso: %v", g)
+	}
+
+	// vínculo: revoga e avisa cada ex-amigo; apaga envelopes nos dois sentidos
+	r = e.register("hk3@ex.com")
+	id = e.me(r.Access).ID
+	f1, f2 := e.me(e.register("hk4@ex.com").Access).ID, e.me(e.register("hk5@ex.com").Access).ID
+	ctx := context.Background()
+	for _, q := range []string{
+		`INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($1, $2, 'accepted')`,
+		`INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($2, $1, 'pending')`,
+		`INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload) VALUES ($1, $2, 'a', 'x'), ($2, $1, 'b', 'x')`,
+	} {
+		other := f1
+		if strings.Contains(q, "pending") {
+			other = f2
+		}
+		if _, err := e.pool.Exec(ctx, q, id, other); err != nil {
+			t.Fatal(err)
+		}
+	}
+	take()
+	if _, err := e.h.svc.googleUser(ctx, "sub-hk3", "hk3@ex.com"); err != nil {
+		t.Fatal(err)
+	}
+	g := take()
+	sort.Strings(g)
+	want := []string{"friends " + id + " " + f1, "friends " + id + " " + f2, "revoke " + id}
+	sort.Strings(want)
+	if fmt.Sprint(g) != fmt.Sprint(want) {
+		t.Fatalf("vínculo: %v, quero %v", g, want)
+	}
+	var n int
+	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM envelopes`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("envelopes: %d %v", n, err)
 	}
 }

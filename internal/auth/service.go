@@ -81,6 +81,8 @@ type Service struct {
 	cfg   Config
 	dummy string        // hash de uma senha aleatória: login sem conta custa o mesmo que com conta
 	argon chan struct{} // teto de hashes simultâneos (19 MiB cada): rajada de logins não estoura a RAM
+	// notify avisa o relay depois do commit: user revogado (derrubar o WS) e ex-amigos (recarregar listas).
+	notify func(user string, exFriends []string)
 	// google troca o code do Google pela identidade (sub, email verificado). Campo para o teste trocar.
 	google func(ctx context.Context, code string) (sub, email string, err error)
 }
@@ -135,9 +137,12 @@ func (s *Service) login(ctx context.Context, email, password string) (tokens, er
 func (s *Service) refresh(ctx context.Context, token string) (tokens, error) {
 	next := randomToken()
 	now := s.now()
-	id, tv, err := s.store.rotate(ctx, sha(token), sha(next), now, now.Add(refreshTTL))
+	id, tv, revoked, err := s.store.rotate(ctx, sha(token), sha(next), now, now.Add(refreshTTL))
 	if err != nil {
 		return tokens{}, err
+	}
+	if revoked != "" {
+		s.notify(revoked, nil)
 	}
 	if id == "" {
 		return tokens{}, errUnauthorized
@@ -146,7 +151,11 @@ func (s *Service) refresh(ctx context.Context, token string) (tokens, error) {
 }
 
 func (s *Service) logout(ctx context.Context, token string) error {
-	return s.store.revoke(ctx, sha(token))
+	user, err := s.store.revoke(ctx, sha(token))
+	if user != "" {
+		s.notify(user, nil)
+	}
+	return err
 }
 
 // issue: login novo = família nova de refresh.
@@ -320,9 +329,12 @@ func (s *Service) googleUser(ctx context.Context, sub, email string) (string, er
 	if linked != nil {
 		return "", googleError{errors.New("email já vinculado a outra conta Google")}
 	}
-	ok, err := s.store.linkGoogle(ctx, id, sub)
+	ok, ex, err := s.store.linkGoogle(ctx, id, sub)
 	if err == nil && !ok {
 		err = googleError{errors.New("vínculo concorrente")}
+	}
+	if ok {
+		s.notify(id, ex)
 	}
 	return id, err
 }

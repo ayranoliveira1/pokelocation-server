@@ -37,6 +37,11 @@ const maxBody = 4 << 10
 
 // Handler: rotas HTTP do auth.
 type Handler struct {
+	// OnRevoke: chamado depois do commit do logout, do reuso de refresh e do vínculo Google (o main liga em hub.Kick).
+	OnRevoke func(user string)
+	// OnFriendsChange: amizade desfeita pelo vínculo Google (o main liga em hub.ReloadFriends dos dois).
+	OnFriendsChange func(a, b string)
+
 	svc       *Service
 	ip, email *ratelimit.Limiter
 }
@@ -55,10 +60,23 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		argon: make(chan struct{}, 2*runtime.NumCPU()),
 	}
 	s.google = s.googleIdentity
+	h := &Handler{svc: s, ip: ratelimit.New(5), email: ratelimit.New(5)}
+	s.notify = h.notify
 	if s.dummy, err = s.hashPassword(context.Background(), rand.Text()); err != nil {
 		return nil, err
 	}
-	return &Handler{svc: s, ip: ratelimit.New(5), email: ratelimit.New(5)}, nil
+	return h, nil
+}
+
+func (h *Handler) notify(user string, exFriends []string) {
+	if h.OnRevoke != nil {
+		h.OnRevoke(user)
+	}
+	if h.OnFriendsChange != nil {
+		for _, f := range exFriends {
+			h.OnFriendsChange(user, f)
+		}
+	}
 }
 
 // Routes registra as rotas; authed protege as 🔒 (no main, o próprio h.Authed).

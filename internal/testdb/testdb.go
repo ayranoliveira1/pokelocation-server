@@ -228,6 +228,15 @@ func (r *RedisCtl) Start(t testing.TB) {
 	}
 }
 
+// Addr devolve o host:porta atual ("" parado). Para um processo de fora (ex.: o binário do servidor); ele não segue o
+// endereço novo depois do Start.
+func (r *RedisCtl) Addr() string {
+	if a := r.addr.Load(); a != nil {
+		return *a
+	}
+	return ""
+}
+
 func (r *RedisCtl) refresh(ctx context.Context) error {
 	a, err := r.c.PortEndpoint(ctx, "6379/tcp", "")
 	if err != nil {
