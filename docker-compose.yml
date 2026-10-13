@@ -1,0 +1,51 @@
+# Desenvolvimento e base da produção (D1). Só o Caddy fica exposto; Postgres e Redis abrem só em 127.0.0.1 (make run).
+# Segredos no .env (veja .env.example).
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: pokelocation
+      POSTGRES_USER: pokelocation
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ["127.0.0.1:${PG_PORT:-5432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pokelocation -d pokelocation"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"] # posições e códigos efêmeros: sem persistência
+    ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
+    restart: unless-stopped
+
+  server:
+    build: .
+    environment:
+      ADDR: ":8080"
+      DATABASE_URL: postgres://pokelocation:${POSTGRES_PASSWORD}@postgres:5432/pokelocation?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      GOMEMLIMIT: ${GOMEMLIMIT:-512MiB}
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_started}
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # .so.gz da libsignal (reserva do GitHub, spec §3.1), gerados por tools/libsignal/prepare.sh no repo do app
+      - ${LIBSIGNAL_DIR:-../pokelocation-social/tools/libsignal/out/0.86.5}:/srv/static/libsignal-0.86.5:ro
+      - caddy:/data
+    depends_on: [server]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy:

@@ -1,0 +1,9 @@
+.env
+/server
+/bin/
+*.test
+*.out
+coverage.*
+testdata/fuzz/
+.maestri/
+.DS_Store

@@ -1,0 +1,7 @@
+.git
+.github
+.maestri
+.env
+docs
+deploy
+*.md
