@@ -5,7 +5,11 @@
 // Decode + Append de um frame repassado = 0 alocações (TestZeroAllocs).
 package wire
 
-import "errors"
+import (
+	"encoding/binary"
+	"errors"
+	"math"
+)
 
 // Tipos de frame.
 const (
@@ -73,6 +77,9 @@ func Decode(b []byte) (Frame, error) {
 	if !r.ok || r.i != len(b) {
 		return f, ErrBadFrame
 	}
+	if f.Payload != nil && len(f.Payload) == 0 { // o app nunca manda payload vazio; envelope vazio seria linha inútil
+		return f, ErrBadFrame
+	}
 	if (f.Type == Envelope && len(f.Payload) > MaxEnvelopePayload) ||
 		((f.Type == Location || f.Type == LocationUpdate) && len(f.Payload) > MaxLocationPayload) {
 		return f, ErrTooLarge
@@ -111,7 +118,7 @@ func (r *reader) str() []byte {
 	if h == nil {
 		return nil
 	}
-	return r.take(int(h[0])<<8 | int(h[1]))
+	return r.take(int(binary.BigEndian.Uint16(h)))
 }
 
 func (r *reader) bin() []byte {
@@ -119,8 +126,8 @@ func (r *reader) bin() []byte {
 	if h == nil {
 		return nil
 	}
-	n := uint64(h[0])<<24 | uint64(h[1])<<16 | uint64(h[2])<<8 | uint64(h[3])
-	if n > uint64(len(r.b)-r.i) {
+	n := int64(binary.BigEndian.Uint32(h))
+	if n > int64(len(r.b)-r.i) { // antes de converter: u32 não cabe em int de 32 bits
 		r.ok = false
 		return nil
 	}
@@ -192,18 +199,25 @@ func AppendLocationOff(dst, from []byte) []byte {
 }
 
 func AppendError(dst []byte, code string) []byte {
-	dst = append(dst, Error, byte(len(code)>>8), byte(len(code)))
-	return append(dst, code...)
+	n := len(code)
+	if n < 0 || n > math.MaxUint16 {
+		panic("wire: str > 65535 bytes")
+	}
+	return append(binary.BigEndian.AppendUint16(append(dst, Error), uint16(n)), code...)
 }
 
 func appendStr(dst, v []byte) []byte {
-	if len(v) > 0xffff {
+	n := len(v)
+	if n < 0 || n > math.MaxUint16 {
 		panic("wire: str > 65535 bytes")
 	}
-	return append(append(dst, byte(len(v)>>8), byte(len(v))), v...)
+	return append(binary.BigEndian.AppendUint16(dst, uint16(n)), v...)
 }
 
 func appendBin(dst, v []byte) []byte {
-	n := uint32(len(v)) // #nosec G115 -- payloads têm teto de 32 KiB (Decode)
-	return append(append(dst, byte(n>>24), byte(n>>16), byte(n>>8), byte(n)), v...)
+	n := len(v)
+	if n < 0 || int64(n) > math.MaxUint32 {
+		panic("wire: bin > 4 GiB")
+	}
+	return append(binary.BigEndian.AppendUint32(dst, uint32(n)), v...)
 }

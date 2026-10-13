@@ -61,6 +61,9 @@ func TestDecodeInvalid(t *testing.T) {
 		"envelope 32KiB+1":   {AppendEnvelope(nil, []byte(uid), []byte("m"), make([]byte, MaxEnvelopePayload+1)), ErrTooLarge},
 		"location 1KiB+1":    {AppendLocation(nil, make([]byte, MaxLocationPayload+1)), ErrTooLarge},
 		"locationUpd 1KiB+1": {AppendLocationUpdate(nil, []byte(uid), make([]byte, MaxLocationPayload+1)), ErrTooLarge},
+		"envelope vazio":     {AppendEnvelope(nil, []byte(uid), []byte("m"), nil), ErrBadFrame},
+		"location vazia":     {AppendLocation(nil, nil), ErrBadFrame},
+		"locationUpd vazia":  {AppendLocationUpdate(nil, []byte(uid), nil), ErrBadFrame},
 	} {
 		if _, err := Decode(c.b); !errors.Is(err, c.want) {
 			t.Errorf("%s: %v, want %v", name, err, c.want)
@@ -69,7 +72,6 @@ func TestDecodeInvalid(t *testing.T) {
 	for _, ok := range [][]byte{
 		AppendEnvelope(nil, []byte(uid), []byte("m"), make([]byte, MaxEnvelopePayload)),
 		AppendLocation(nil, make([]byte, MaxLocationPayload)),
-		AppendLocation(nil, nil),
 	} {
 		if _, err := Decode(ok); err != nil {
 			t.Errorf("no limite: %v", err)
