@@ -5,7 +5,7 @@ export
 .PHONY: test fuzz lint run ca
 
 test:
-	go test -race ./...
+	tools/gtest.sh -race ./...
 
 # Cada FuzzXxx de cada pacote por $(FUZZTIME).
 fuzz:

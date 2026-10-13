@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"io/fs"
 	"testing"
 	"time"
 
@@ -42,8 +43,9 @@ func TestMigrate(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*), max(version) FROM schema_version`).Scan(&n, &v); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || v != 1 {
-		t.Fatalf("schema_version: %d linhas, versão %d", n, v)
+	files, _ := fs.Glob(migrations, "migrations/*.sql")
+	if n != len(files) || v != len(files) {
+		t.Fatalf("schema_version: %d linhas, versão %d; want %d", n, v, len(files))
 	}
 
 	var a, b string

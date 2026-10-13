@@ -46,10 +46,13 @@ As migrações (`internal/db/migrations`) rodam sozinhas na subida.
 ## Testes
 
 ```sh
-make test   # go test -race ./... (integração com Postgres/Redis reais via testcontainers: precisa de Docker)
+make test   # tools/gtest.sh -race ./... (integração com Postgres/Redis reais via testcontainers: precisa de Docker)
 make fuzz   # cada FuzzXxx por 60 s (FUZZTIME=…)
 make lint   # go vet, govulncheck, gosec
 ```
+
+Teste que sobe container roda **só** por `tools/gtest.sh <args do go test>`: trava global (um por vez na máquina,
+`-p 2`) e remoção dos containers de teste parados no fim. Teste puro, sem container, pode usar `go test` direto.
 
 ## Licença
 
