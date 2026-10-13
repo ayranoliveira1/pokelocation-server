@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const nobody = "00000000-0000-0000-0000-000000000001"
@@ -213,6 +214,7 @@ func TestMatrizChaves(t *testing.T) {
 		befriend(s, a, f)
 		fs = append(fs, f)
 	}
+	burst := time.Now() // baldes dos pares cheios (10) aqui
 	var mu sync.Mutex
 	var ec, ky []int
 	var wg sync.WaitGroup
@@ -253,12 +255,11 @@ func TestMatrizChaves(t *testing.T) {
 		t.Errorf("one-time entregues: ec=%v kyber=%v (esperado 20 distintas de cada)", ec, ky)
 	}
 
-	// 10 por minuto por par: f1 já fez 6; mais 4 passam, a 11ª não. Outro par (f2) segue livre.
+	// 10 por minuto por par: f1 já gastou 6 (sobram 4 desde o burst). Outro par (f2) segue livre.
 	f1, f2 := fs[1], fs[2]
-	for i := range 4 {
-		s.check(fmt.Sprint("busca ", 7+i, " do par"), s.do("GET", "/v1/keys/"+a.id, f1.access, nil), 200, "")
-	}
-	s.check("11ª busca do par", s.do("GET", "/v1/keys/"+a.id, f1.access, nil), 429, "rate_limited")
+	s.bucket("chaves por par", 4, 6*time.Second, burst, 200, func(int) resp {
+		return s.do("GET", "/v1/keys/"+a.id, f1.access, nil)
+	})
 	s.check("outro par", s.do("GET", "/v1/keys/"+a.id, f2.access, nil), 200, "")
 
 	// Teto de 200 guardadas por tipo.
@@ -277,10 +278,10 @@ func TestPedidoRateLimit(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/friends/requests")
 	x, y, z := s.register("x"), s.register("y"), s.register("z")
-	for i := range 10 {
-		s.want(s.do("POST", "/v1/friends/requests", x.access, map[string]string{"code": fmt.Sprintf("ZZZZZZ%02d", i)}), 404, "code_not_found")
-	}
-	s.check("11º pedido (código válido)", s.do("POST", "/v1/friends/requests", x.access, map[string]string{"code": y.code}), 429, "rate_limited")
+	// Só códigos inexistentes: o 429 chegar prova que os erros contam.
+	s.bucket("pedidos com erro", 10, 6*time.Second, time.Now(), 404, func(i int) resp {
+		return s.do("POST", "/v1/friends/requests", x.access, map[string]string{"code": fmt.Sprintf("ZZZZZZ%02d", i)})
+	})
 	s.check("outro usuário", s.do("POST", "/v1/friends/requests", z.access, map[string]string{"code": y.code}), 201, "")
 }
 

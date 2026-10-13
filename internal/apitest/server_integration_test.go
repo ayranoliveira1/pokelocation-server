@@ -289,6 +289,28 @@ func (s *server) register(name string) user {
 	return u
 }
 
+// bucket confere um limite token bucket (N por minuto = capacidade N, repõe 1 a cada every) sem supor janela fixa:
+// chama call até vir 429 e exige que tenham passado pelo menos budget e no máximo budget + créditos repostos desde since
+// (quando o balde estava com budget). Toda resposta antes do 429 tem de ser ok. Sob carga (-race, todos os pacotes) as
+// chamadas podem levar mais que every, e o crédito reposto é correto.
+func (s *server) bucket(what string, budget int, every time.Duration, since time.Time, ok int, call func(i int) resp) {
+	s.t.Helper()
+	for i := 0; i < budget+30; i++ {
+		r := call(i)
+		if r.status == 429 {
+			s.check(what+": 429", r, 429, "rate_limited")
+			if max := budget + int(time.Since(since)/every); i < budget || i > max {
+				s.t.Errorf("%s: passaram %d antes do 429, esperado entre %d e %d", what, i, budget, max)
+			}
+			return
+		}
+		if r.status != ok {
+			s.t.Fatalf("%s: chamada %d: esperado %d, veio %d %s", what, i+1, ok, r.status, r.raw)
+		}
+	}
+	s.t.Errorf("%s: nenhum 429 em %d chamadas", what, budget+30)
+}
+
 func freeAddr(t *testing.T) string {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

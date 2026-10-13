@@ -2,6 +2,7 @@ package testdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -157,10 +158,12 @@ func runRedis(ctx context.Context) (*tcredis.RedisContainer, error) {
 			wait.ForLog("Ready to accept connections").WithStartupTimeout(startTimeout)))
 }
 
+var errRedisStopped = errors.New("testdb: redis parado (dial recusado)")
+
 // RedisCtl derruba e religa o Redis de StoppableRedis.
 type RedisCtl struct {
 	c    *tcredis.RedisContainer
-	addr atomic.Pointer[string]
+	addr atomic.Pointer[string] // nil = parado
 }
 
 // StoppableRedis sobe um Redis só deste teste (segundos a mais) e devolve um cliente que segue o container entre
@@ -181,17 +184,24 @@ func StoppableRedis(t testing.TB) (*redis.Client, *RedisCtl) {
 	cl := redis.NewClient(&redis.Options{
 		Addr: "testdb-redis", // ignorado: o Dialer usa o endereço atual
 		Dialer: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			a := r.addr.Load()
+			if a == nil {
+				return nil, errRedisStopped
+			}
 			var d net.Dialer
-			return d.DialContext(ctx, network, *r.addr.Load())
+			return d.DialContext(ctx, network, *a)
 		},
 	})
 	t.Cleanup(func() { _ = cl.Close() })
 	return cl, r
 }
 
-// Stop mata o Redis na hora (SIGKILL), como uma queda.
+// Stop mata o Redis na hora (SIGKILL), como uma queda: até o Start, toda conexão nova é recusada.
 func (r *RedisCtl) Stop(t testing.TB) {
 	t.Helper()
+	// Esquece o endereço antes de parar: a porta liberada no host pode ir para o container de outro teste, e o cliente
+	// falaria com o Redis errado.
+	r.addr.Store(nil)
 	var now time.Duration
 	if err := r.c.Stop(context.Background(), &now); err != nil {
 		t.Fatal("testdb: stop:", err)

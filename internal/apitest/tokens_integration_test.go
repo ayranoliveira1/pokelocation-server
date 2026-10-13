@@ -175,22 +175,14 @@ func TestLoginRateLimit(t *testing.T) {
 	}
 	t.Run("por email, IP girando", func(t *testing.T) {
 		s := s.on(t) // s.ip "" = IP novo a cada requisição: só o limite por email segura
-		for i := range 5 {
-			if r := login(s, "alvo@teste.dev"); r.status != 401 {
-				t.Fatalf("login %d: %d %s", i+1, r.status, r.raw)
-			}
-		}
-		s.want(login(s, "alvo@teste.dev"), 429, "rate_limited")
+		s.bucket("login por email", 5, 12*time.Second, time.Now(), 401, func(int) resp { return login(s, "alvo@teste.dev") })
 	})
 	t.Run("por IP, email girando", func(t *testing.T) {
 		s := s.on(t)
 		s.ip = "203.0.113.9"
-		for i := range 5 {
-			if r := login(s, fmt.Sprintf("x%d@teste.dev", i)); r.status != 401 {
-				t.Fatalf("login %d: %d %s", i+1, r.status, r.raw)
-			}
-		}
-		s.want(login(s, "x9@teste.dev"), 429, "rate_limited")
+		s.bucket("login por IP", 5, 12*time.Second, time.Now(), 401, func(i int) resp {
+			return login(s, fmt.Sprintf("x%d@teste.dev", i))
+		})
 	})
 }
 

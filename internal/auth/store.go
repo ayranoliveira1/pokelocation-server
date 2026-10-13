@@ -77,6 +77,9 @@ func (s *Store) version(ctx context.Context, id string) (int, error) {
 // UPDATE users antes dos DELETE: espera a rotação em voo (ver rotate).
 // ponytail: sem o advisory lock dos pares do friends; um pedido de amizade do invasor já autenticado e em voo pode
 // gravar depois do DELETE. Janela de milissegundos; travar cada par (pg_advisory_xact_lock) se virar caso real.
+// ponytail: idem para um login do invasor com a senha velha que passa no argon2 logo antes do vínculo e grava a família
+// logo depois (login tem 5/min por email). Se virar caso real: no login, gravar o refresh com
+// INSERT … SELECT … FROM users WHERE id = $1 AND password_hash = $2 FOR NO KEY UPDATE (0 linhas → invalid_credentials).
 func (s *Store) linkGoogle(ctx context.Context, id, sub string) (bool, error) {
 	ok := false
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
