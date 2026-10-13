@@ -12,7 +12,7 @@ import (
 )
 
 type Handler struct {
-	svc      *Service
+	*Service                    // embutido: o main liga h.OnChange (ex.: hub.ReloadFriends dos dois)
 	requests *ratelimit.Limiter // POST /v1/friends/requests por usuário: o código é a única barreira (32⁸)
 }
 
@@ -33,7 +33,7 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	l, err := h.svc.List(r.Context(), httpx.User(r.Context()))
+	l, err := h.Service.List(r.Context(), httpx.User(r.Context()))
 	if err != nil {
 		fail(w, err)
 		return
@@ -52,7 +52,7 @@ func (h *Handler) request(w http.ResponseWriter, r *http.Request) {
 	if !httpx.Decode(w, r, 4<<10, &in) {
 		return
 	}
-	id, status, created, err := h.svc.Request(r.Context(), httpx.User(r.Context()), in.Code)
+	id, status, created, err := h.Service.Request(r.Context(), httpx.User(r.Context()), in.Code)
 	if err != nil {
 		fail(w, err)
 		return
@@ -65,23 +65,23 @@ func (h *Handler) request(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) accept(w http.ResponseWriter, r *http.Request) {
-	done(w, h.svc.Accept(r.Context(), httpx.User(r.Context()), r.PathValue("id")))
+	done(w, h.Service.Accept(r.Context(), httpx.User(r.Context()), r.PathValue("id")))
 }
 
 func (h *Handler) decline(w http.ResponseWriter, r *http.Request) {
-	done(w, h.svc.Decline(r.Context(), httpx.User(r.Context()), r.PathValue("id")))
+	done(w, h.Service.Decline(r.Context(), httpx.User(r.Context()), r.PathValue("id")))
 }
 
 func (h *Handler) remove(w http.ResponseWriter, r *http.Request) {
-	done(w, h.svc.Remove(r.Context(), httpx.User(r.Context()), r.PathValue("userId")))
+	done(w, h.Service.Remove(r.Context(), httpx.User(r.Context()), r.PathValue("userId")))
 }
 
 func (h *Handler) block(w http.ResponseWriter, r *http.Request) {
-	done(w, h.svc.Block(r.Context(), httpx.User(r.Context()), r.PathValue("userId")))
+	done(w, h.Service.Block(r.Context(), httpx.User(r.Context()), r.PathValue("userId")))
 }
 
 func (h *Handler) unblock(w http.ResponseWriter, r *http.Request) {
-	done(w, h.svc.Unblock(r.Context(), httpx.User(r.Context()), r.PathValue("userId")))
+	done(w, h.Service.Unblock(r.Context(), httpx.User(r.Context()), r.PathValue("userId")))
 }
 
 // done: 204 ou o erro.

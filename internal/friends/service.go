@@ -46,9 +46,15 @@ type List struct {
 }
 
 // Service: regras que não são do banco — normalização do código, pedido para si, ids malformados.
-type Service struct{ store *Store }
+type Service struct {
+	store *Store
+	// OnChange, se não for nil, é chamado depois do commit sempre que a e b viram ou deixam de ser amigos aceitos
+	// (aceite, aceite cruzado, desfazer amizade, bloqueio). O main liga no relay (recarregar a lista dos dois).
+	// Definido antes de servir; nunca trocado depois.
+	OnChange func(a, b string)
+}
 
-func NewService(store *Store) *Service { return &Service{store} }
+func NewService(store *Store) *Service { return &Service{store: store} }
 
 // Request pede amizade ao dono de rawCode. created: pedido novo (201); senão o existente ou o aceite cruzado (200).
 func (s *Service) Request(ctx context.Context, me, rawCode string) (id, status string, created bool, err error) {
@@ -63,14 +69,28 @@ func (s *Service) Request(ctx context.Context, me, rawCode string) (id, status s
 	if to == me {
 		return "", "", false, ErrSelf
 	}
-	return s.store.request(ctx, me, to)
+	id, status, created, err = s.store.request(ctx, me, to)
+	if err == nil && status == "accepted" { // aceite cruzado (já amigos volta ErrAlreadyFriends)
+		s.changed(me, to)
+	}
+	return id, status, created, err
+}
+
+func (s *Service) changed(a, b string) {
+	if s.OnChange != nil {
+		s.OnChange(a, b)
+	}
 }
 
 func (s *Service) Accept(ctx context.Context, me, id string) error {
 	if !isUUID(id) {
 		return ErrNotFound
 	}
-	return s.store.accept(ctx, me, id)
+	from, err := s.store.accept(ctx, me, id)
+	if err == nil {
+		s.changed(me, from)
+	}
+	return err
 }
 
 func (s *Service) Decline(ctx context.Context, me, id string) error {
@@ -85,7 +105,12 @@ func (s *Service) Remove(ctx context.Context, me, other string) error {
 	if !isUUID(other) {
 		return nil
 	}
-	return s.store.remove(ctx, me, other)
+	other = strings.ToLower(other) // a forma do banco: o relay indexa por ela
+	friends, err := s.store.remove(ctx, me, other)
+	if err == nil && friends { // só depois do commit
+		s.changed(me, other)
+	}
+	return err
 }
 
 func (s *Service) Block(ctx context.Context, me, other string) error {
@@ -95,7 +120,12 @@ func (s *Service) Block(ctx context.Context, me, other string) error {
 	if strings.EqualFold(other, me) { // o path pode vir em maiúsculas
 		return errBlockSelf
 	}
-	return s.store.block(ctx, me, other)
+	other = strings.ToLower(other)
+	friends, err := s.store.block(ctx, me, other)
+	if err == nil && friends { // só depois do commit
+		s.changed(me, other)
+	}
+	return err
 }
 
 func (s *Service) Unblock(ctx context.Context, me, other string) error {

@@ -20,6 +20,7 @@ type env struct {
 	t    *testing.T
 	pool *pgxpool.Pool
 	mux  *http.ServeMux
+	h    *Handler
 }
 
 type user struct{ id, code string }
@@ -29,8 +30,9 @@ func newEnv(t *testing.T) *env {
 	t.Parallel()
 	pool := testdb.Pool(t)
 	mux := http.NewServeMux()
-	New(pool).Routes(mux, func(h http.HandlerFunc) http.Handler { return h }) // usuário vem do contexto (httpx.WithUser)
-	return &env{t, pool, mux}
+	h := New(pool)
+	h.Routes(mux, func(h http.HandlerFunc) http.Handler { return h }) // usuário vem do contexto (httpx.WithUser)
+	return &env{t, pool, mux, h}
 }
 
 func (e *env) user() user {
@@ -372,4 +374,84 @@ func TestRequestRateLimit(t *testing.T) {
 	e.want(a, "POST", "/v1/friends/requests", `{"code":"`+b.code+`"}`, 429, "rate_limited")
 	e.want(a, "POST", "/v1/friends/requests", `não é json`, 429, "rate_limited")
 	e.want(b, "POST", "/v1/friends/requests", `{"code":"`+a.code+`"}`, 201, "") // outro usuário não é afetado
+}
+
+// OnChange avisa (a, b) só quando a lista de amigos aceitos de alguém muda — o relay recarrega a dos dois.
+func TestOnChange(t *testing.T) {
+	e := newEnv(t)
+	var got []string
+	e.h.OnChange = func(a, b string) { got = append(got, a+">"+b) }
+	expect := func(step string, want ...string) {
+		t.Helper()
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s: OnChange %v, want %v", step, got, want)
+		}
+		got = nil
+	}
+	a, b, c, d := e.user(), e.user(), e.user(), e.user()
+
+	id := e.request(a, b)["id"].(string)
+	expect("pedido")
+	e.want(b, "POST", "/v1/friends/requests/"+id+"/accept", "", 204, "")
+	expect("aceite", b.id+">"+a.id)
+
+	e.request(c, a)
+	expect("pedido de c")
+	e.want(a, "POST", "/v1/friends/requests", `{"code":"`+c.code+`"}`, 200, "")
+	expect("aceite cruzado", a.id+">"+c.id)
+
+	e.want(a, "DELETE", "/v1/friends/"+b.id, "", 204, "")
+	expect("desfazer amizade", a.id+">"+b.id)
+	e.want(a, "DELETE", "/v1/friends/"+b.id, "", 204, "")
+	expect("desfazer de novo")
+
+	e.request(d, a)
+	e.want(a, "DELETE", "/v1/friends/"+d.id, "", 204, "")
+	expect("desfazer pedido pendente")
+
+	e.want(a, "POST", "/v1/blocks/"+c.id, "", 204, "")
+	expect("bloquear amigo", a.id+">"+c.id)
+	e.want(a, "POST", "/v1/blocks/"+d.id, "", 204, "")
+	expect("bloquear não-amigo")
+	e.want(a, "DELETE", "/v1/blocks/"+c.id, "", 204, "")
+	expect("desbloquear")
+
+	id = e.request(a, b)["id"].(string)
+	e.want(b, "POST", "/v1/friends/requests/"+id+"/decline", "", 204, "")
+	expect("recusar")
+	e.want(b, "POST", "/v1/friends/requests/"+id+"/accept", "", 404, "not_found")
+	expect("aceite falho")
+
+	e.h.OnChange = nil // sem gancho (testes, main sem relay): nada quebra
+	id = e.request(a, b)["id"].(string)
+	e.want(b, "POST", "/v1/friends/requests/"+id+"/accept", "", 204, "")
+}
+
+// Bloqueio apaga os envelopes pendentes entre os dois, nos dois sentidos ("sem envelopes"); os de terceiros ficam.
+func TestBlockDropsEnvelopes(t *testing.T) {
+	e := newEnv(t)
+	a, b, c := e.user(), e.user(), e.user()
+	ins := `INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload) VALUES ($1, $2, $3, '\x01')`
+	e.exec(ins, a.id, b.id, "b→a")
+	e.exec(ins, b.id, a.id, "a→b")
+	e.exec(ins, a.id, c.id, "c→a")
+	e.exec(ins, c.id, b.id, "b→c")
+
+	e.want(a, "POST", "/v1/blocks/"+b.id, "", 204, "")
+
+	rows, err := e.pool.Query(context.Background(), `SELECT client_msg_id FROM envelopes ORDER BY client_msg_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		left = append(left, id)
+	}
+	if strings.Join(left, ",") != "b→c,c→a" {
+		t.Fatalf("envelopes depois do bloqueio: %v, want só os de terceiros", left)
+	}
 }

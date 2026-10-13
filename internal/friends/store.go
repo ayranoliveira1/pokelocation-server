@@ -111,9 +111,9 @@ func friendsRoom(ctx context.Context, tx pgx.Tx, a, b string) error {
 }
 
 // accept: só o destinatário de um pedido pendente.
-func (s *Store) accept(ctx context.Context, me, id string) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		var from string
+// Devolve quem pediu (o novo amigo).
+func (s *Store) accept(ctx context.Context, me, id string) (from string, err error) {
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `SELECT requester_id FROM friendships
 			WHERE id = $1 AND addressee_id = $2 AND status = 'pending'`, id, me).Scan(&from)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -136,6 +136,7 @@ func (s *Store) accept(ctx context.Context, me, id string) error {
 		}
 		return acceptLocked(ctx, tx, id, me, from)
 	})
+	return from, err
 }
 
 // decline: destinatário recusa ou quem pediu cancela.
@@ -148,15 +149,16 @@ func (s *Store) decline(ctx context.Context, me, id string) error {
 	return err
 }
 
-// remove desfaz amizade ou pedido entre os dois, em qualquer direção.
-func (s *Store) remove(ctx context.Context, me, other string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM friendships WHERE `+pairIs, me, other)
-	return err
+// remove desfaz amizade ou pedido entre os dois, em qualquer direção. friends: era amizade aceita.
+func (s *Store) remove(ctx context.Context, me, other string) (friends bool, err error) {
+	err = s.pool.QueryRow(ctx, `WITH d AS (DELETE FROM friendships WHERE `+pairIs+` RETURNING status)
+		SELECT EXISTS (SELECT 1 FROM d WHERE status = 'accepted')`, me, other).Scan(&friends)
+	return friends, err
 }
 
-// block: bloqueia e apaga amizade/pedido entre os dois.
-func (s *Store) block(ctx context.Context, me, other string) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+// block: bloqueia e apaga amizade/pedido e envelopes pendentes entre os dois. friends: havia amizade aceita.
+func (s *Store) block(ctx context.Context, me, other string) (friends bool, err error) {
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, lockPair, me, other); err != nil {
 			return err
 		}
@@ -174,9 +176,15 @@ func (s *Store) block(ctx context.Context, me, other string) error {
 				return ErrNotFound
 			}
 		}
-		_, err = tx.Exec(ctx, `DELETE FROM friendships WHERE `+pairIs, me, other)
-		return err
+		// "sem envelopes": a fila pendente entre os dois some junto (senão sairia no backlog e no GET /v1/envelopes)
+		if _, err := tx.Exec(ctx, `DELETE FROM envelopes WHERE (recipient_id = $1 AND sender_id = $2)
+			OR (recipient_id = $2 AND sender_id = $1)`, me, other); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `WITH d AS (DELETE FROM friendships WHERE `+pairIs+` RETURNING status)
+			SELECT EXISTS (SELECT 1 FROM d WHERE status = 'accepted')`, me, other).Scan(&friends)
 	})
+	return friends, err
 }
 
 func (s *Store) unblock(ctx context.Context, me, other string) error {
