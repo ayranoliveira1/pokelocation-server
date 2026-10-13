@@ -37,7 +37,13 @@ var codeSeq atomic.Int32
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	t.Parallel()
-	e := &env{t: t, pool: testdb.Pool(t), locs: make(chan string, 16)}
+	return newEnvPool(t, testdb.Pool(t))
+}
+
+// newEnvPool: outro Hub (outra instância) sobre o mesmo banco.
+func newEnvPool(t *testing.T, pool *pgxpool.Pool) *env {
+	t.Helper()
+	e := &env{t: t, pool: pool, locs: make(chan string, 16)}
 	verify := func(_ context.Context, tok string) (string, time.Time, error) {
 		if len(tok) != 36 {
 			return "", time.Time{}, auth.ErrUnauthorized
@@ -126,7 +132,12 @@ func (e *env) online(user string) *client {
 
 func (e *env) waitOnline(user string, n int) {
 	e.t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+	e.waitOnlineWithin(user, n, 5*time.Second)
+}
+
+func (e *env) waitOnlineWithin(user string, n int, d time.Duration) {
+	e.t.Helper()
+	for deadline := time.Now().Add(d); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
 		if e.hub.online(user) == n {
 			return
 		}
@@ -393,7 +404,9 @@ func TestSlowConsumerClosed(t *testing.T) {
 	for i := range 4 * queueCap {
 		ca.send(envelope(b, fmt.Sprintf("m%d", i), big))
 	}
-	e.waitOnline(b, 0)
+	// cai pela fila cheia (1013) ou, se o buffer do kernel engolir os MB (loopback do macOS), pelo write travado em
+	// writeWait: os dois são o comportamento certo para um cliente que não lê
+	e.waitOnlineWithin(b, 0, writeWait+5*time.Second)
 	for deadline := time.Now().Add(30 * time.Second); e.count(`SELECT count(*) FROM envelopes`) != 4*queueCap; {
 		if time.Now().After(deadline) {
 			t.Fatalf("gravados %d", e.count(`SELECT count(*) FROM envelopes`))

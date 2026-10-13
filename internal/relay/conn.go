@@ -368,6 +368,9 @@ func (c *Conn) auth() bool {
 		h.beforeRegister()
 	}
 	h.register(c, nil)
+	if h.cl != nil { // cluster: o que outra instância publicar daqui em diante já chega a esta conexão
+		h.cl.wait(id, subWait)
+	}
 	// Corte do backlog lido logo depois do register: o que for gravado daqui em diante já sai ao vivo para esta
 	// conexão; o backlog manda só até aqui (sem isso, tudo que chegasse durante o Auth sairia em dobro).
 	cutoff, err := h.store.maxID(ctx, id)

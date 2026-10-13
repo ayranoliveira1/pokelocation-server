@@ -47,6 +47,7 @@ type Hub struct {
 	authWait   time.Duration // 1º frame (Auth); campo para o teste encurtar
 	// beforeRegister: gancho de teste (nil em produção) para simular uma mudança de amizade durante o Auth.
 	beforeRegister func()
+	cl             *cluster // nil = uma instância só (EnableCluster liga)
 }
 
 type shard struct {
@@ -137,6 +138,9 @@ func (h *Hub) register(c *Conn, fs *friendSet) {
 	}
 	u.conns = append(u.conns, c)
 	s.mu.Unlock()
+	if h.cl != nil {
+		h.cl.touch(c.user)
+	}
 	if evicted != nil {
 		evicted.kill(websocket.ClosePolicyViolation, "")
 	}
@@ -154,6 +158,9 @@ func (h *Hub) unregister(c *Conn) {
 		}
 	}
 	s.mu.Unlock()
+	if h.cl != nil {
+		h.cl.touch(c.user)
+	}
 }
 
 // online: quantas conexões o usuário tem aqui.
@@ -167,10 +174,18 @@ func (h *Hub) online(id string) int {
 	return 0
 }
 
-// deliver: ÚNICO ponto de saída de frames para um usuário (o S8 estende para outras instâncias aqui). Entrega ob a
-// todas as conexões locais de user, sem cópia: cada fila ganha uma referência. droppable = posição (fila cheia
-// descarta a mais velha); senão fila cheia de envelopes fecha a conexão. O chamador segue dono da própria referência.
+// deliver: ÚNICO ponto de saída de frames para um usuário: as conexões daqui e, com o cluster ligado, as das outras
+// instâncias (cluster.go). droppable = posição (fila cheia descarta a mais velha); senão fila cheia de envelopes fecha
+// a conexão. O chamador segue dono da própria referência.
 func (h *Hub) deliver(user []byte, ob *outBuf, droppable bool) {
+	h.deliverLocal(user, ob, droppable)
+	if h.cl != nil {
+		h.cl.frame(user, ob.b, droppable)
+	}
+}
+
+// deliverLocal entrega ob a todas as conexões de user nesta instância, sem cópia: cada fila ganha uma referência.
+func (h *Hub) deliverLocal(user []byte, ob *outBuf, droppable bool) {
 	s := h.shardOf(fnv(user))
 	var full []*Conn
 	s.mu.Lock()
@@ -240,12 +255,22 @@ func (h *Hub) sendFriends(id string, ob *outBuf) {
 // ReloadFriends recarrega a lista de amigos em memória de user, se ele tiver conexão aqui (evento de amizade).
 // ponytail: síncrono (o 204 do friends espera a leitura, até dbWait com o Postgres lento); se pesar, chamar em
 // goroutine: a serialização por usuário (user.reload) já garante a ordem.
-func (h *Hub) ReloadFriends(user string) { h.reloadLocal(user) }
+func (h *Hub) ReloadFriends(user string) {
+	h.reloadLocal(user)
+	if h.cl != nil {
+		h.cl.ctl(kindReload, user)
+	}
+}
 
 // Kick derruba todas as conexões de user com Error{unauthorized} + 1008 (revogação: logout, reuso, vínculo).
-func (h *Hub) Kick(user string) { h.kickLocal(user) }
+func (h *Hub) Kick(user string) {
+	h.kickLocal(user)
+	if h.cl != nil {
+		h.cl.ctl(kindKick, user)
+	}
+}
 
-// reloadLocal/kickLocal: só esta instância (o S8 passa os dois pelo pub/sub).
+// reloadLocal/kickLocal: só esta instância; com o cluster, as outras recebem por relay:ctl.
 func (h *Hub) reloadLocal(id string) {
 	s := h.shardOf(fnv(id))
 	s.mu.Lock()

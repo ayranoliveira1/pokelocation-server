@@ -27,6 +27,7 @@ import (
 
 type config struct {
 	addr, databaseURL, redisURL string
+	cluster                     bool // CLUSTER=1: várias instâncias atrás do mesmo Redis (S8)
 	auth                        auth.Config
 }
 
@@ -35,6 +36,7 @@ func loadConfig() (config, error) {
 		addr:        os.Getenv("ADDR"),
 		databaseURL: os.Getenv("DATABASE_URL"),
 		redisURL:    os.Getenv("REDIS_URL"),
+		cluster:     os.Getenv("CLUSTER") == "1",
 		auth: auth.Config{
 			SigningKey:         os.Getenv("AUTH_SIGNING_KEY"),
 			GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
@@ -92,6 +94,9 @@ func run() error {
 	var loc *location.Service // relay → location só por callback (location importa relay)
 	hub := relay.New(pool, authH.Verify, func(c *relay.Conn, f wire.Frame) { loc.OnFrame(c, f) })
 	loc = location.New(rdb, pool, hub)
+	if cfg.cluster {
+		hub.EnableCluster(ctx, rdb)
+	}
 
 	// amizade mudou → listas em memória dos dois lados; revogação → derruba os WS na hora
 	reload := func(a, b string) { hub.ReloadFriends(a); hub.ReloadFriends(b) }
