@@ -218,7 +218,7 @@ func (h *Hub) deliverLocal(user []byte, ob *outBuf, droppable bool) {
 	if u := s.users[string(user)]; u != nil {
 		for _, c := range u.conns {
 			ob.ref()
-			if !c.q.push(ob, droppable) {
+			if !c.push(ob, droppable) {
 				full = append(full, c) // só aloca quando um cliente travou
 			}
 		}
@@ -358,7 +358,6 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 	ws.SetReadLimit(readLimit)
 	c := newConn(h, ws)
-	go c.writeLoop()
 	// Fora do handler: enquanto ele não retorna, o net/http segura os bufio de 4 KB e a pilha da conexão hijacked.
 	go c.readLoop()
 }

@@ -58,15 +58,16 @@ type item struct {
 	drop bool // posição
 }
 
-// queue: o writer da conexão é o único consumidor.
+// queue: no máximo um escritor por vez e só depois do Auth aprovado.
 type queue struct {
 	mu        sync.Mutex
 	items     [queueCap]item
 	head, n   int
+	ready     bool // Auth aprovado: antes disso nenhum frame de dado sai (token revogado não vê nem metadado)
+	running   bool // há escritor; quem tira o último item zera sob mu, então o item que chega depois sobe outro
 	closing   bool
 	closeCode int    // 0 = só fecha o socket
 	closeErr  string // "" = sem Error antes do close
-	wake      chan struct{}
 	space     chan struct{}
 }
 
@@ -77,51 +78,18 @@ func signal(ch chan struct{}) {
 	}
 }
 
-// push: a referência passa à fila. Cheia, tira a posição mais velha; só com envelopes, uma posição nova é descartada
-// e um envelope novo devolve false (quem chama fecha a conexão: o envelope segue no Postgres).
-func (q *queue) push(ob *outBuf, drop bool) bool {
-	q.mu.Lock()
-	if q.closing {
-		q.mu.Unlock()
-		ob.release()
-		return true
-	}
-	if q.n == queueCap && !q.evictDroppable() {
-		q.mu.Unlock()
-		ob.release()
-		return drop
-	}
+func (q *queue) add(ob *outBuf, drop bool) {
 	q.items[(q.head+q.n)%queueCap] = item{ob, drop}
 	q.n++
-	q.mu.Unlock()
-	signal(q.wake)
-	return true
 }
 
-// pushWait: contrapressão do backlog. false = conexão fechando.
-func (q *queue) pushWait(ob *outBuf, done <-chan struct{}) bool {
-	for {
-		q.mu.Lock()
-		if q.closing {
-			q.mu.Unlock()
-			ob.release()
-			return false
-		}
-		if q.n < backlogMax {
-			q.items[(q.head+q.n)%queueCap] = item{ob, false}
-			q.n++
-			q.mu.Unlock()
-			signal(q.wake)
-			return true
-		}
-		q.mu.Unlock()
-		select {
-		case <-q.space:
-		case <-done:
-			ob.release()
-			return false
-		}
+// claim: chamar com mu. true = quem chamou sobe o escritor.
+func (q *queue) claim() bool {
+	if q.ready && !q.running {
+		q.running = true
+		return true
 	}
+	return false
 }
 
 // evictDroppable: chamar com q.mu. false = só envelopes na fila.
@@ -147,6 +115,7 @@ func (q *queue) pop() (item, bool) {
 		return item{}, true
 	}
 	if q.n == 0 {
+		q.running = false
 		q.mu.Unlock()
 		return item{}, false
 	}
@@ -159,7 +128,7 @@ func (q *queue) pop() (item, bool) {
 	return it, false
 }
 
-// Conn: uma goroutine de leitura (readLoop) e uma de escrita (writeLoop).
+// Conn: uma goroutine de leitura (readLoop); o escritor (flush) só existe enquanto há o que escrever.
 type Conn struct {
 	hub   *Hub
 	ws    *websocket.Conn
@@ -167,14 +136,20 @@ type Conn struct {
 	userB []byte // para montar frames sem converter a cada envio
 	u     *user
 	q     queue
-	done  chan struct{} // fecha quando o writer termina
-	ready chan struct{} // fecha quando o Auth aprova: antes disso o writer não escreve frame de dado
-	exp   *time.Timer
+	write func([]byte) error // campo para o teste medir o escritor sem socket
+	// flushFn: method value criado uma vez; "go c.flush()" alocaria um closure a cada subida do escritor.
+	flushFn func()
+	ping    *time.Timer
+	done    chan struct{} // fecha quando o socket fecha
+	exp     *time.Timer
 }
 
 func newConn(h *Hub, ws *websocket.Conn) *Conn {
-	return &Conn{hub: h, ws: ws, done: make(chan struct{}), ready: make(chan struct{}),
-		q: queue{wake: make(chan struct{}, 1), space: make(chan struct{}, 1)}}
+	c := &Conn{hub: h, ws: ws, done: make(chan struct{}), q: queue{space: make(chan struct{}, 1)}}
+	c.write = c.writeWS
+	c.flushFn = c.flush
+	c.ping = time.AfterFunc(pingEvery, c.sendPing)
+	return c
 }
 
 func (c *Conn) User() string { return c.user }
@@ -192,82 +167,145 @@ func (c *Conn) friend(peer []byte) bool {
 	return fs.has(peer)
 }
 
-// kill: o primeiro vale. Não bloqueia: o writer manda o Error e o close e fecha o socket. code 0 = só fecha.
-func (c *Conn) kill(code int, errCode string) {
+// push: a referência passa à fila. Cheia, tira a posição mais velha; só com envelopes, uma posição nova é descartada
+// e um envelope novo devolve false (quem chama fecha a conexão: o envelope segue no Postgres).
+func (c *Conn) push(ob *outBuf, drop bool) bool {
+	q := &c.q
+	q.mu.Lock()
+	if q.closing {
+		q.mu.Unlock()
+		ob.release()
+		return true
+	}
+	if q.n == queueCap && !q.evictDroppable() {
+		q.mu.Unlock()
+		ob.release()
+		return drop
+	}
+	q.add(ob, drop)
+	start := q.claim()
+	q.mu.Unlock()
+	if start {
+		go c.flushFn()
+	}
+	return true
+}
+
+// pushWait: contrapressão do backlog. false = conexão fechando.
+func (c *Conn) pushWait(ob *outBuf) bool {
+	q := &c.q
+	for {
+		q.mu.Lock()
+		if q.closing {
+			q.mu.Unlock()
+			ob.release()
+			return false
+		}
+		if q.n < backlogMax {
+			q.add(ob, false)
+			start := q.claim()
+			q.mu.Unlock()
+			if start {
+				go c.flushFn()
+			}
+			return true
+		}
+		q.mu.Unlock()
+		select {
+		case <-q.space:
+		case <-c.done:
+			ob.release()
+			return false
+		}
+	}
+}
+
+// setReady libera a escrita depois do Auth aprovado; o que chegou durante o Auth sai agora.
+func (c *Conn) setReady() {
 	c.q.mu.Lock()
-	if c.q.closing {
-		c.q.mu.Unlock()
+	c.q.ready = true
+	start := c.q.n > 0 && c.q.claim()
+	c.q.mu.Unlock()
+	if start {
+		go c.flushFn()
+	}
+}
+
+// kill: o primeiro vale. Não bloqueia: o escritor (o que está rodando ou um novo) manda o Error e o close e fecha o
+// socket. code 0 = só fecha.
+func (c *Conn) kill(code int, errCode string) {
+	q := &c.q
+	q.mu.Lock()
+	if q.closing {
+		q.mu.Unlock()
 		return
 	}
-	c.q.closing, c.q.closeCode, c.q.closeErr = true, code, errCode
-	for ; c.q.n > 0; c.q.n-- {
-		c.q.items[c.q.head].ob.release()
-		c.q.items[c.q.head] = item{}
-		c.q.head = (c.q.head + 1) % queueCap
+	q.closing, q.closeCode, q.closeErr = true, code, errCode
+	for ; q.n > 0; q.n-- {
+		q.items[q.head].ob.release()
+		q.items[q.head] = item{}
+		q.head = (q.head + 1) % queueCap
 	}
-	c.q.mu.Unlock()
-	signal(c.q.wake)
-	signal(c.q.space)
+	start := !q.running
+	q.running = true
+	q.mu.Unlock()
+	signal(q.space)
+	if start {
+		go c.flushFn()
+	}
 }
 
 func (c *Conn) sendError(code string) {
 	ob := getOut()
 	ob.b = wire.AppendError(ob.b, code)
-	if !c.q.push(ob, false) {
+	if !c.push(ob, false) {
 		c.kill(websocket.CloseTryAgainLater, "")
 	}
 }
 
-func (c *Conn) writeLoop() {
-	defer close(c.done)
-	defer c.ws.Close() // acorda o readLoop
-	// O token só é conferido contra token_version depois do register: até o Auth aprovar, o que chegar fica na fila
-	// e só o Error/close de um kill pode sair (um token revogado não vê nem metadado).
-	for waiting := true; waiting; {
-		select {
-		case <-c.ready:
-			waiting = false
-		case <-c.q.wake:
-			if c.closing() {
-				c.writeClose()
-				return
-			}
-		}
-	}
-	signal(c.q.wake)
-	ping := time.NewTicker(pingEvery)
-	defer ping.Stop()
+// flush escreve até esvaziar a fila e termina; no kill, fecha o socket. running garante um por vez.
+func (c *Conn) flush() {
 	for {
-		select {
-		case <-c.q.wake:
-		case <-ping.C:
-			if err := c.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
-				c.kill(0, "")
-			}
+		it, closing := c.q.pop()
+		if closing {
+			c.shutdown()
+			return
 		}
-		for {
-			it, closing := c.q.pop()
-			if closing {
-				c.writeClose()
-				return
-			}
-			if it.ob == nil {
-				break
-			}
-			_ = c.ws.SetWriteDeadline(time.Now().Add(writeWait))
-			err := c.ws.WriteMessage(websocket.BinaryMessage, it.ob.b)
-			it.ob.release()
-			if err != nil {
-				c.kill(0, "")
-			}
+		if it.ob == nil {
+			return
+		}
+		err := c.write(it.ob.b)
+		it.ob.release()
+		if err != nil {
+			c.kill(0, "")
 		}
 	}
 }
 
-func (c *Conn) closing() bool {
-	c.q.mu.Lock()
-	defer c.q.mu.Unlock()
-	return c.q.closing
+func (c *Conn) writeWS(b []byte) error {
+	_ = c.ws.SetWriteDeadline(time.Now().Add(writeWait))
+	return c.ws.WriteMessage(websocket.BinaryMessage, b)
+}
+
+// sendPing: WriteControl pode correr junto com o escritor (gorilla).
+func (c *Conn) sendPing() {
+	if c.ws == nil {
+		return
+	}
+	if err := c.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
+		c.kill(0, "")
+		return
+	}
+	c.ping.Reset(pingEvery)
+}
+
+func (c *Conn) shutdown() {
+	c.ping.Stop()
+	if c.ws != nil {
+		c.writeClose()
+		_ = c.ws.Close() // acorda o readLoop
+	}
+	close(c.done)
 }
 
 func (c *Conn) writeClose() {
@@ -385,7 +423,7 @@ func (c *Conn) auth() bool {
 		c.kill(websocket.CloseInternalServerErr, "") // banco fora: o app reconecta com espera
 		return false
 	}
-	close(c.ready)
+	c.setReady()
 	go c.backlog(cutoff)
 	return true
 }
@@ -414,7 +452,7 @@ func (c *Conn) backlog(upTo int64) {
 		for _, e := range page {
 			ob := getOut()
 			ob.b = wire.AppendEnvelope(ob.b, []byte(e.From), []byte(e.ClientMsgID), e.Payload)
-			if !c.q.pushWait(ob, c.done) {
+			if !c.pushWait(ob) {
 				return
 			}
 			after = e.ID

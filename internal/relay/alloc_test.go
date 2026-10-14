@@ -63,3 +63,26 @@ func BenchmarkRelayEnvelope(b *testing.B) {
 		drain(cb)
 	}
 }
+
+// Escritor sob demanda: enfileirar numa conexão pronta e ociosa sobe uma goroutine (pilha do cache do runtime) que
+// escreve e termina. Mede o repasse inteiro, inclusive essa subida.
+func TestZeroAllocsOnDemandWriter(t *testing.T) {
+	h := New(nil, nil, nil)
+	const a, b = "0b9f8c56-0d7e-4c1f-9a39-3c0d1e8e7a11", "1c0f9d67-1e8f-4d20-8b4a-4d1e2f9f8b22"
+	ca := readyConn(h, a, func([]byte) error { return nil })
+	cb := readyConn(h, b, func([]byte) error { return nil })
+	ca.u.friends.Store(newFriendSet([]string{b}))
+	msg := wire.AppendEnvelope(nil, []byte(b), []byte("m1"), make([]byte, 600))
+	run := func() {
+		f, _ := wire.Decode(msg)
+		h.relayEnvelope(ca, f, true)
+		waitIdle(ca)
+		waitIdle(cb)
+	}
+	for range 100 {
+		run()
+	}
+	if n := testing.AllocsPerRun(1000, run); n != 0 {
+		t.Errorf("%.2f allocs/op com o escritor subindo a cada frame", n)
+	}
+}

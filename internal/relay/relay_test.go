@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -733,4 +734,23 @@ func TestRevokedSeesNothing(t *testing.T) {
 	c := e.connect(a)
 	c.wantError("unauthorized")
 	c.wantClose(websocket.ClosePolicyViolation)
+}
+
+// Conexão ociosa: só a goroutine de leitura (o escritor sobe sob demanda).
+func TestIdleConnGoroutines(t *testing.T) {
+	e := newEnv(t)
+	const n = 50
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = e.user()
+	}
+	time.Sleep(100 * time.Millisecond)
+	g0 := runtime.NumGoroutine()
+	for _, id := range ids {
+		e.online(id)
+	}
+	time.Sleep(300 * time.Millisecond) // escritores da resposta bad_frame terminam
+	if d := runtime.NumGoroutine() - g0; d > n+10 {
+		t.Fatalf("%d goroutines para %d conexões ociosas", d, n)
+	}
 }
