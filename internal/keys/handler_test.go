@@ -86,7 +86,7 @@ func (e *env) want(user, method, path string, body []byte, status int, code stri
 	return out
 }
 
-// ---- chaves falsas no formato da libsignal ----
+// Chaves falsas no formato da libsignal.
 
 func rnd(n int, prefix byte) []byte {
 	b := make([]byte, n)

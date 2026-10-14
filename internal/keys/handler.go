@@ -23,7 +23,7 @@ const (
 	maxBody               = 512 << 10
 )
 
-// preKey de entrada. KeyID é ponteiro para distinguir "faltando" de 0 (válido).
+// KeyID é ponteiro para distinguir "faltando" de 0 (válido).
 type preKey struct {
 	KeyID     *int64 `json:"key_id"`
 	PublicKey []byte `json:"public_key"`
@@ -85,7 +85,6 @@ type Handler struct {
 
 func New(pool *pgxpool.Pool) *Handler { return &Handler{NewStore(pool), ratelimit.New(10)} }
 
-// Routes registra as rotas de docs/api.md §4, todas autenticadas.
 func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
 	mux.Handle("PUT /v1/keys", authed(h.put))
 	mux.Handle("GET /v1/keys/count", authed(h.count))
@@ -136,7 +135,6 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, f)
 }
 
-// fail traduz o erro para o código do contrato; o resto (banco) vai para httpx.DBError.
 func fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errForbidden):

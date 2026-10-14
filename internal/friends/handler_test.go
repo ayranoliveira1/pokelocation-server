@@ -54,7 +54,6 @@ func (e *env) exec(q string, args ...any) {
 	}
 }
 
-// do chama a rota como u e devolve status e corpo decodificado (nil se vazio).
 func (e *env) do(u user, method, path, body string) (int, map[string]any) {
 	e.t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -376,7 +375,7 @@ func TestRequestRateLimit(t *testing.T) {
 	e.want(b, "POST", "/v1/friends/requests", `{"code":"`+a.code+`"}`, 201, "") // outro usuário não é afetado
 }
 
-// OnChange avisa (a, b) só quando a lista de amigos aceitos de alguém muda — o relay recarrega a dos dois.
+// OnChange avisa (a, b) só quando a lista de amigos aceitos muda.
 func TestOnChange(t *testing.T) {
 	e := newEnv(t)
 	var got []string

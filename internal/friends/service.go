@@ -45,18 +45,16 @@ type List struct {
 	Outgoing []Request `json:"outgoing"`
 }
 
-// Service: regras que não são do banco — normalização do código, pedido para si, ids malformados.
 type Service struct {
 	store *Store
-	// OnChange, se não for nil, é chamado depois do commit sempre que a e b viram ou deixam de ser amigos aceitos
-	// (aceite, aceite cruzado, desfazer amizade, bloqueio). O main liga no relay (recarregar a lista dos dois).
+	// OnChange, se não for nil, roda depois do commit quando a e b viram ou deixam de ser amigos aceitos.
 	// Definido antes de servir; nunca trocado depois.
 	OnChange func(a, b string)
 }
 
 func NewService(store *Store) *Service { return &Service{store: store} }
 
-// Request pede amizade ao dono de rawCode. created: pedido novo (201); senão o existente ou o aceite cruzado (200).
+// created: pedido novo (201); senão o pedido existente ou o aceite cruzado (200).
 func (s *Service) Request(ctx context.Context, me, rawCode string) (id, status string, created bool, err error) {
 	code := Normalize(rawCode)
 	if code == "" {
@@ -70,7 +68,7 @@ func (s *Service) Request(ctx context.Context, me, rawCode string) (id, status s
 		return "", "", false, ErrSelf
 	}
 	id, status, created, err = s.store.request(ctx, me, to)
-	if err == nil && status == "accepted" { // aceite cruzado (já amigos volta ErrAlreadyFriends)
+	if err == nil && status == "accepted" { // aceite cruzado
 		s.changed(me, to)
 	}
 	return id, status, created, err
@@ -100,7 +98,6 @@ func (s *Service) Decline(ctx context.Context, me, id string) error {
 	return s.store.decline(ctx, me, id)
 }
 
-// Remove é idempotente: id malformado é só "nada a desfazer".
 func (s *Service) Remove(ctx context.Context, me, other string) error {
 	if !isUUID(other) {
 		return nil
@@ -137,13 +134,13 @@ func (s *Service) Unblock(ctx context.Context, me, other string) error {
 
 func (s *Service) List(ctx context.Context, me string) (List, error) { return s.store.list(ctx, me) }
 
-// isUUID: só a forma canônica (36 chars), a que o servidor devolve; evita erro de sintaxe do Postgres.
+// Só a forma canônica (36 chars): evita erro de sintaxe no Postgres.
 func isUUID(s string) bool { return len(s) == 36 && uuid.Validate(s) == nil }
 
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
-// NewCode sorteia um friend_code: 8 símbolos Crockford base32 com crypto/rand. Único só na prática: quem grava
-// (cadastro) repete se o índice único de users.friend_code acusar colisão.
+// NewCode sorteia um friend_code com crypto/rand. Único só na prática: quem grava repete se o índice único acusar
+// colisão.
 func NewCode() string {
 	var b [8]byte
 	rand.Read(b[:])
@@ -153,8 +150,8 @@ func NewCode() string {
 	return string(b[:])
 }
 
-// Normalize faz o mesmo que Api.normalizeCode do app: maiúsculas, I/L→1, O→0, sem espaços e '-'. "" se, depois
-// disso, não sobrarem exatamente 8 símbolos Crockford.
+// Normalize tem de concordar com Api.normalizeCode do app (maiúsculas, I/L→1, O→0, sem espaços e '-'). "" se
+// inválido.
 func Normalize(raw string) string {
 	var b [8]byte
 	n := 0

@@ -12,16 +12,14 @@ import (
 )
 
 type Handler struct {
-	*Service                    // embutido: o main liga h.OnChange (ex.: hub.ReloadFriends dos dois)
+	*Service                    // embutido: expõe h.OnChange ao main
 	requests *ratelimit.Limiter // POST /v1/friends/requests por usuário: o código é a única barreira (32⁸)
 }
 
-// New monta handler, service e store sobre o pool.
 func New(pool *pgxpool.Pool) *Handler {
 	return &Handler{NewService(NewStore(pool)), ratelimit.New(10)}
 }
 
-// Routes registra as rotas de docs/api.md §3, todas autenticadas.
 func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
 	mux.Handle("GET /v1/friends", authed(h.list))
 	mux.Handle("POST /v1/friends/requests", authed(h.request))
@@ -84,7 +82,6 @@ func (h *Handler) unblock(w http.ResponseWriter, r *http.Request) {
 	done(w, h.Service.Unblock(r.Context(), httpx.User(r.Context()), r.PathValue("userId")))
 }
 
-// done: 204 ou o erro.
 func done(w http.ResponseWriter, err error) {
 	if err != nil {
 		fail(w, err)
@@ -93,7 +90,6 @@ func done(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// fail traduz o erro para o código do contrato; o resto (banco) vai para httpx.DBError.
 func fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):

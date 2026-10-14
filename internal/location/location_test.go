@@ -305,8 +305,6 @@ func TestConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
-// ---- GET /v1/locations ----
-
 type env struct {
 	t    *testing.T
 	pool *pgxpool.Pool

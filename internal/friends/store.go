@@ -9,8 +9,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Store: tabelas users (só leitura), friendships e blocks. Operações num par rodam sob um advisory lock do par, o que
-// serializa pedido cruzado, aceite e bloqueio simultâneos entre as mesmas duas pessoas.
+// Operações num par rodam sob um advisory lock do par: serializa pedido cruzado, aceite e bloqueio simultâneos entre
+// as mesmas duas pessoas.
 type Store struct{ pool *pgxpool.Pool }
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool} }
@@ -28,13 +28,12 @@ func (s *Store) userByCode(ctx context.Context, code string) (string, error) {
 	return id, err
 }
 
-// request: pedido de me para to (já existentes e distintos). Devolve o id do pedido/amizade, o status e se criou.
 func (s *Store) request(ctx context.Context, me, to string) (id, status string, created bool, err error) {
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, lockPair, me, to); err != nil {
 			return err
 		}
-		var mine bool // true: me bloqueou to (prioridade: 403 blocked); false: só to bloqueou me
+		var mine bool // me bloqueou to: tem prioridade (403 blocked)
 		err := tx.QueryRow(ctx, `SELECT blocker_id = $1 FROM blocks
 			WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
 			ORDER BY blocker_id = $1 DESC LIMIT 1`, me, to).Scan(&mine)
@@ -54,8 +53,8 @@ func (s *Store) request(ctx context.Context, me, to string) (id, status string, 
 		case err == nil && status == "accepted":
 			return ErrAlreadyFriends
 		case err == nil && fromMe:
-			return nil // idempotente
-		case err == nil: // pedido dela para mim: aceita
+			return nil
+		case err == nil: // pedido dela para mim: aceite cruzado
 			status = "accepted"
 			return acceptLocked(ctx, tx, id, me, to)
 		case !errors.Is(err, pgx.ErrNoRows):
@@ -83,7 +82,7 @@ func (s *Store) request(ctx context.Context, me, to string) (id, status string, 
 	return id, status, created, err
 }
 
-// acceptLocked vira o pedido id (entre a e b, já travado) em amizade, se nenhum dos dois estiver no teto.
+// Chamar com o par já travado.
 func acceptLocked(ctx context.Context, tx pgx.Tx, id, a, b string) error {
 	if err := friendsRoom(ctx, tx, a, b); err != nil {
 		return err
@@ -92,7 +91,6 @@ func acceptLocked(ctx context.Context, tx pgx.Tx, id, a, b string) error {
 	return err
 }
 
-// friendsRoom: ErrLimit se a ou b já tem maxFriends amigos.
 // ponytail: conta sem travar os outros pares de a e b; dois aceites simultâneos podem passar de 500 por 1.
 // Trava por usuário se o teto virar regra dura.
 func friendsRoom(ctx context.Context, tx pgx.Tx, a, b string) error {
@@ -110,8 +108,6 @@ func friendsRoom(ctx context.Context, tx pgx.Tx, a, b string) error {
 	return nil
 }
 
-// accept: só o destinatário de um pedido pendente.
-// Devolve quem pediu (o novo amigo).
 func (s *Store) accept(ctx context.Context, me, id string) (from string, err error) {
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `SELECT requester_id FROM friendships
@@ -139,7 +135,6 @@ func (s *Store) accept(ctx context.Context, me, id string) (from string, err err
 	return from, err
 }
 
-// decline: destinatário recusa ou quem pediu cancela.
 func (s *Store) decline(ctx context.Context, me, id string) error {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM friendships
 		WHERE id = $1 AND status = 'pending' AND (requester_id = $2 OR addressee_id = $2)`, id, me)
@@ -149,14 +144,12 @@ func (s *Store) decline(ctx context.Context, me, id string) error {
 	return err
 }
 
-// remove desfaz amizade ou pedido entre os dois, em qualquer direção. friends: era amizade aceita.
 func (s *Store) remove(ctx context.Context, me, other string) (friends bool, err error) {
 	err = s.pool.QueryRow(ctx, `WITH d AS (DELETE FROM friendships WHERE `+pairIs+` RETURNING status)
 		SELECT EXISTS (SELECT 1 FROM d WHERE status = 'accepted')`, me, other).Scan(&friends)
 	return friends, err
 }
 
-// block: bloqueia e apaga amizade/pedido e envelopes pendentes entre os dois. friends: havia amizade aceita.
 func (s *Store) block(ctx context.Context, me, other string) (friends bool, err error) {
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, lockPair, me, other); err != nil {
@@ -192,7 +185,6 @@ func (s *Store) unblock(ctx context.Context, me, other string) error {
 	return err
 }
 
-// list: amigos e pedidos pendentes nos dois sentidos, mais antigos primeiro. Os tetos limitam o tamanho.
 func (s *Store) list(ctx context.Context, me string) (List, error) {
 	l := List{Friends: []Friend{}, Incoming: []Request{}, Outgoing: []Request{}}
 	rows, err := s.pool.Query(ctx, `SELECT f.id, f.status, f.requester_id = $1, u.id, u.friend_code, f.created_at

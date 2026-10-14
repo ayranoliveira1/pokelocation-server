@@ -1,5 +1,4 @@
-// Package keys guarda e entrega o pacote de chaves públicas do Signal (docs/api.md §4). Sem regra além da validação:
-// handler + store, sem service.
+// Package keys guarda e entrega o pacote de chaves públicas do Signal (docs/api.md §4).
 package keys
 
 import (
@@ -23,8 +22,7 @@ type Store struct{ pool *pgxpool.Pool }
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool} }
 
-// put grava/substitui o aparelho e acrescenta as one-time. identity nova (reinstalação) apaga as one-time antigas.
-// Tudo ou nada: passou de maxStored num tipo, nada muda.
+// Tudo ou nada. identity nova (reinstalação) apaga as one-time antigas.
 func (s *Store) put(ctx context.Context, user string, b *bundle) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		// serializa PUTs do mesmo usuário (inclusive o primeiro, quando ainda não há linha para FOR UPDATE)
@@ -70,7 +68,7 @@ func (s *Store) put(ctx context.Context, user string, b *bundle) error {
 	})
 }
 
-// insertOneTime acrescenta num INSERT só (unnest); key_id repetido é ignorado. EC tem signature nil → NULL.
+// EC: signature nil vira NULL.
 func insertOneTime(ctx context.Context, tx pgx.Tx, user, kind string, keys []preKey) error {
 	if len(keys) == 0 {
 		return nil
@@ -101,8 +99,6 @@ func (s *Store) count(ctx context.Context, user string) (ec, ky int, err error) 
 	return count(ctx, s.pool, user)
 }
 
-// fetch entrega o bundle de other a me (só amigo aceito, sem bloqueio em nenhum sentido), consumindo 1 one-time EC
-// e 1 Kyber. Sem Kyber one-time, vai a last resort; sem EC, OneTimePrekey fica nil.
 func (s *Store) fetch(ctx context.Context, me, other string) (*fetched, error) {
 	var out *fetched
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
