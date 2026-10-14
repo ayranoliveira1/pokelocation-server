@@ -11,8 +11,8 @@ Planos do apitest inteiro com o servidor 18b58ed (consulta única no Auth do WS,
 | Conexões · quedas · perdas | 15 mil · 0 · 0 | 15 mil · 0 · 0 | 15 mil · 0 · 0 (0 sem Ack, 0 duplicados) | 0 perdas |
 | Latência posição p99 | 4–16 ms | 4,0 ms | 3,7 ms (máx 26 ms) | < 50 ms |
 | Latência envelope p99 | 4–16 ms | 9,4 ms | 5,8 ms (máx 39 ms) | < 50 ms |
-| RAM por conexão viva | 37 KB | 24,8 KB | 20,4 KB (342 − 37 MB) | ≤ 25 KB |
-| RAM por conexão no pico | 55,7 KB | 32 KB | 22,7 KB (370 − 37 MB) | ≤ 25 KB |
+| RAM por conexão viva | 37 KB | 24,8 KB | 20,8 KB ((342,3 − 37,0) MB × 1024 ÷ 15 mil) | ≤ 25 KB |
+| RAM por conexão no pico | 55,7 KB | 32 KB | 22,7 KB ((369,9 − 37,0) MB × 1024 ÷ 15 mil) | ≤ 25 KB |
 | CPU média | 0,48 núcleo (1 GiB) | 0,45 núcleo | 0,43 núcleo | |
 | Location enviadas/s · recebidas/s | | | 3013 · 30134 | |
 | Envelopes enviados/s · entregues/s | | | 251 · 251 | |
@@ -30,17 +30,21 @@ O DELETE único, antes e depois da 0003, apagando 82 mil envelopes de 900 mil e 
 | `DELETE FROM refresh_tokens WHERE expires_at < $1` | 235 ms, Seq Scan | 79 ms, Bitmap Index Scan |
 
 Com a carga, o DELETE único chegou a 12,3 s (acima do statement_timeout de 10 s) e explica o envelope p99 de 103 ms
-de uma rodada curta. O código passou a apagar em lotes de 5000, mas **o lote atual não usa os índices novos**:
+de uma rodada curta. O código passou a apagar em lotes (`cleanupBatch` = 1000), mas a primeira versão do lote não usava
+os índices novos:
 `… WHERE id IN (SELECT id … WHERE created_at < … LIMIT $1)` sem `ORDER BY` vira Seq Scan com parada antecipada, cada
 lote relê o começo já limpo da tabela, e no refresh o DELETE externo lê a tabela inteira a cada lote (Hash Semi Join).
 
-| Limpeza completa (17–18 lotes) | Lote atual | `id = ANY(ARRAY(SELECT id … ORDER BY created_at LIMIT $1))` |
+| Limpeza completa (medida com lotes de 5000: 17–18 lotes) | Primeiro lote (sem ORDER BY) | `id = ANY(ARRAY(SELECT id … ORDER BY created_at LIMIT $1))` |
 |---|---|---|
 | envelopes, 83 mil | 1737 ms, pior lote 237 ms, Seq Scan | 1212–1689 ms, pior lote 138–144 ms, Index Scan dentro e fora |
 | refresh, 89 mil | 393 ms, pior lote 41 ms, Seq Scan por lote | 253–267 ms, pior lote 17–49 ms, Index Scan dentro e fora |
 
 Nesta escala os tempos ficam no ruído do cache; a diferença é de crescimento: a forma com `ORDER BY` custa o mesmo por
-lote qualquer que seja o backlog. `TestIndicesCriticosSeed` falha nos dois lotes até a troca.
+lote qualquer que seja o backlog. A medição usou lotes de 5000 e o código usa 1000; como o custo por lote com
+`ORDER BY` não depende do backlog, a conclusão vale para os dois (com 1000 são 5 vezes mais lotes, cada um menor).
+Os dois lotes já usam essa forma (relay e auth, `qCleanup`), e o teste de plano de cada pacote
+(`RequireIndexNoSort`) reprova se o índice deixar de entregar a ordem.
 
 ## Planos (apitest)
 
