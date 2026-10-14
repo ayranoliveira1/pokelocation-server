@@ -25,7 +25,6 @@ var (
 	dbSeq  atomic.Int32
 )
 
-// newDB: um container por binário de teste (o ryuk o derruba no fim) e um banco novo por teste.
 func newDB(t *testing.T) string {
 	t.Helper()
 	testcontainers.SkipIfProviderIsNotHealthy(t)
@@ -173,8 +172,7 @@ func TestMigrate(t *testing.T) {
 	}
 }
 
-// Com o índice em construção (preso esperando uma transação antiga), outra escrita na tabela passa na hora. Um
-// CREATE INDEX comum estaria na fila do lock e a escrita ficaria atrás dele.
+// Um CREATE INDEX comum preso atrás da transação antiga deixaria a escrita na fila do lock.
 func TestNoTxDoesNotBlockWrites(t *testing.T) {
 	ctx := context.Background()
 	pool := openDB(t)
@@ -246,7 +244,6 @@ func TestConcurrentMigrators(t *testing.T) {
 	}
 }
 
-// Um CONCURRENTLY que falha deixa o índice INVALID e não grava a versão; na repetição, ele é apagado e recriado.
 func TestInvalidIndexRecreated(t *testing.T) {
 	ctx := context.Background()
 	pool := openDB(t)

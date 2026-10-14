@@ -65,7 +65,6 @@ func DBError(w http.ResponseWriter, pkg string, err error) {
 	Error(w, http.StatusServiceUnavailable, "unavailable")
 }
 
-// Timed dá prazo à requisição inteira; o statement_timeout do pool é só a rede de segurança.
 func Timed(d time.Duration, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), d)

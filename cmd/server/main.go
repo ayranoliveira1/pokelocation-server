@@ -42,13 +42,12 @@ type config struct {
 
 func loadConfig() (config, error) {
 	c := config{
-		addr:        os.Getenv("ADDR"),
-		databaseURL: os.Getenv("DATABASE_URL"),
-		redisURL:    os.Getenv("REDIS_URL"),
-		pprofAddr:   os.Getenv("PPROF_ADDR"),
-		cluster:     os.Getenv("CLUSTER") == "1",
-		logRequests: os.Getenv("LOG_REQUESTS") == "1",
-		// vazio = envio falso (só registra o ping no log), como nos testes e no local
+		addr:           os.Getenv("ADDR"),
+		databaseURL:    os.Getenv("DATABASE_URL"),
+		redisURL:       os.Getenv("REDIS_URL"),
+		pprofAddr:      os.Getenv("PPROF_ADDR"),
+		cluster:        os.Getenv("CLUSTER") == "1",
+		logRequests:    os.Getenv("LOG_REQUESTS") == "1",
 		fcmCredentials: os.Getenv("FCM_CREDENTIALS"),
 		auth: auth.Config{
 			SigningKey:         os.Getenv("AUTH_SIGNING_KEY"),
@@ -134,7 +133,6 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz(pool))
-	// /v1/me e PUT /v1/me/username ficam livres; o resto exige o @nome (docs/api.md §8)
 	authH.Routes(mux, authH.Authed)
 	named := authH.AuthedNamed
 	fh.Routes(mux, named)
@@ -181,8 +179,8 @@ func healthz(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// daily roda f a cada 24 h. A primeira espera 10–20 min: logo depois de um deploy o banco está ocupado com a onda de
-// reconexão, e o sorteio evita que várias instâncias limpem juntas.
+// A primeira rodada espera 10–20 min: logo depois de um deploy o banco está ocupado com a onda de reconexão, e o
+// sorteio evita que as instâncias limpem juntas.
 func daily(ctx context.Context, name string, f func(context.Context) error) {
 	next := time.NewTimer(firstRun + rand.N(firstRun)) // #nosec G404 -- só espalha horário, não é segredo
 	defer next.Stop()
@@ -201,7 +199,7 @@ func daily(ctx context.Context, name string, f func(context.Context) error) {
 
 const firstRun = 10 * time.Minute
 
-// servePprof: mux próprio, nunca o da API. PPROF_ADDR tem de ser interno (ex.: 127.0.0.1:6060).
+// O pprof expõe o processo: mux próprio e PPROF_ADDR só interno.
 func servePprof(addr string) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
@@ -215,8 +213,7 @@ func servePprof(addr string) {
 	}
 }
 
-// withRequestLog: só para depurar no local (LOG_REQUESTS=1). Rota sem query, nunca corpo nem cabeçalhos: a query do
-// login Google leva o code, e o Authorization leva o token.
+// Rota sem query, nunca corpo nem cabeçalhos: a query do login Google leva o code, e o Authorization, o token.
 func withRequestLog(on bool, next http.Handler) http.Handler {
 	if !on {
 		return next

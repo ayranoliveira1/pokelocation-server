@@ -39,7 +39,7 @@ func TestRequestLog(t *testing.T) {
 		resp.Body.Close()
 	}
 	srv.Close()
-	// o log sai depois de o cliente ter a resposta, e conexão sequestrada não é esperada pelo Close
+	// o Close não espera conexão sequestrada
 	out := buf.String()
 	for deadline := time.Now().Add(2 * time.Second); !strings.Contains(out, `"status":101`) && time.Now().Before(deadline); {
 		time.Sleep(5 * time.Millisecond)

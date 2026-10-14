@@ -1,4 +1,4 @@
-// Package username: regras do @nome (docs/api.md §8), as mesmas no cadastro, na troca e na busca de amigo.
+// Package username: regras do @nome (docs/api.md §8).
 package username
 
 import (
@@ -17,8 +17,7 @@ var reserved = map[string]bool{
 	"sistema": true, "system": true,
 }
 
-// Check devolve o @nome normalizado (trim + minúsculas) ou ErrInvalid/ErrReserved. O CHECK da coluna no banco repete
-// a regra de formato, então nada fora dela chega a ser gravado.
+// O CHECK da coluna users.username repete o formato: mudou aqui, mude lá (nova migração).
 func Check(s string) (string, error) {
 	n := strings.TrimSpace(s)
 	for i := 0; i < len(n); i++ {

@@ -27,8 +27,7 @@ const lockID = 0x706f6b656c6f63
 // o Auth do WS, 4 consultas cada, ao mesmo tempo) e os Auths estouram o prazo. pool_max_conns no DSN tem precedência.
 const maxConns = 32
 
-// Teto no servidor para query presa ou transação esquecida aberta segurar conexão do pool sem limite. Os handlers
-// têm prazo próprio, menor; isto é a rede de segurança.
+// Rede de segurança contra query presa ou transação esquecida segurando conexão do pool; os handlers têm prazo menor.
 const (
 	statementTimeout = "10s"
 	idleInTxTimeout  = "30s"
@@ -60,13 +59,10 @@ func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// noTxMarker na 1ª linha: a migração roda fora de transação, um comando por vez (exigido por CREATE INDEX
-// CONCURRENTLY). Índice novo em tabela que já existe vai sempre assim, para não travar escrita durante a construção.
-// A versão só é gravada no fim, então todo comando tem de ser idempotente (a migração se repete depois de uma falha).
+// noTxMarker na 1ª linha: fora de transação, um comando por vez (CREATE INDEX CONCURRENTLY exige). A versão só é
+// gravada no fim, então todo comando tem de ser idempotente: a migração se repete depois de uma falha.
 const noTxMarker = "-- migrate:no-transaction"
 
-// Migrate aplica as migrations/NNNN_nome.sql acima da versão em schema_version, cada uma na sua transação (ou sem
-// transação, com noTxMarker). A versão só é gravada depois que a migração inteira deu certo.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error { return migrate(ctx, pool, migrations) }
 
 func migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) error {
@@ -114,7 +110,6 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) error {
 		const record = `INSERT INTO schema_version (version) VALUES ($1)`
 		sql := string(b)
 		if strings.HasPrefix(sql, noTxMarker) {
-			// sem transação, a versão vem depois: os comandos são idempotentes e a repetição é segura
 			if err = applyNoTx(ctx, conn, sql); err == nil {
 				_, err = conn.Exec(ctx, record, v)
 			}
@@ -136,8 +131,7 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) error {
 
 var createConcurrently = regexp.MustCompile(`(?is)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(IF\s+NOT\s+EXISTS\s+)?([\w.]+)`)
 
-// applyNoTx exige IF NOT EXISTS nos índices, para a migração poder ser repetida depois de falhar no meio. Um
-// CONCURRENTLY que falha deixa o índice INVALID, que o IF NOT EXISTS manteria para sempre: é apagado e recriado.
+// Um CONCURRENTLY que falha deixa o índice INVALID, e o IF NOT EXISTS o manteria assim para sempre.
 func applyNoTx(ctx context.Context, conn *pgx.Conn, sql string) error {
 	for _, stmt := range statements(sql) {
 		if m := createConcurrently.FindStringSubmatch(stmt); m != nil {
@@ -164,8 +158,7 @@ func applyNoTx(ctx context.Context, conn *pgx.Conn, sql string) error {
 	return nil
 }
 
-// statements separa por ';' no fim da linha e descarta linhas de comentário: migração sem transação não pode ter
-// ';' no meio de um comando.
+// statements separa pelo ';' do fim da linha: comando de migração sem transação não pode ter ';' no meio.
 func statements(sql string) []string {
 	var out []string
 	var cur strings.Builder
@@ -187,8 +180,8 @@ func statements(sql string) []string {
 	return out
 }
 
-// lock pega o lock de sessão em tentativas curtas. Esperar dentro de pg_advisory_lock deixaria um snapshot aberto,
-// e o CREATE INDEX CONCURRENTLY da instância que tem o lock espera todo snapshot antigo terminar: deadlock.
+// Tentativas curtas: esperar dentro de pg_advisory_lock deixaria um snapshot aberto, e o CREATE INDEX CONCURRENTLY
+// da instância que tem o lock espera todo snapshot antigo terminar (deadlock).
 func lock(ctx context.Context, conn *pgx.Conn) error {
 	for {
 		var ok bool
