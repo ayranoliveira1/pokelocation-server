@@ -26,10 +26,10 @@ import (
 const (
 	accessTTL  = 15 * time.Minute
 	refreshTTL = 30 * 24 * time.Hour
-	stateTTL   = 10 * time.Minute // start → callback (usuário no navegador)
-	codeTTL    = 60 * time.Second // callback → exchange (app)
+	stateTTL   = 10 * time.Minute // o usuário está no navegador, escolhendo a conta
+	codeTTL    = 60 * time.Second
 
-	// argon2id, parâmetros OWASP. 19 MiB por hash: no máximo 2×NumCPU ao mesmo tempo; sem vaga em argonWait → 503.
+	// argon2id com os parâmetros da OWASP.
 	argonM, argonT, argonP, argonLen = 19 * 1024, 2, 1, 32
 	argonWait                        = 2 * time.Second
 
@@ -37,7 +37,7 @@ const (
 	googleTokenURL = "https://oauth2.googleapis.com/token" // #nosec G101 -- URL pública do OAuth do Google
 )
 
-// apiError: falha esperada, vira {"error": code} com o status do api.md.
+// apiError: falha esperada, respondida como {"error": code}.
 type apiError struct {
 	status int
 	code   string
@@ -56,11 +56,11 @@ var (
 	errBadState     = errors.New("auth: state desconhecido")
 	errArgonBusy    = errors.New("auth: argon2 sem vaga")
 
-	// ErrUnauthorized: token inválido, vencido ou revogado (Verify).
 	ErrUnauthorized error = errUnauthorized
 )
 
-// claims do access: tv = users.token_version na emissão (revogação = incremento; tv diferente → 401).
+// claims: tv = users.token_version na emissão. Revogar incrementa a versão, e todo access com tv antigo morre na hora
+// (sem janela de relógio).
 type claims struct {
 	jwt.RegisteredClaims
 	TV *int `json:"tv,omitempty"`
@@ -72,22 +72,19 @@ type tokens struct {
 	ExpiresIn int    `json:"expires_in"`
 }
 
-// Service: regra de contas e tokens (api.md §2).
 type Service struct {
-	key   ed25519.PrivateKey
-	now   func() time.Time
-	store *Store
-	rdb   *redis.Client
-	cfg   Config
-	dummy string        // hash de uma senha aleatória: login sem conta custa o mesmo que com conta
-	argon chan struct{} // teto de hashes simultâneos (19 MiB cada): rajada de logins não estoura a RAM
-	// notify avisa o relay depois do commit: user revogado (derrubar o WS) e ex-amigos (recarregar listas).
+	key    ed25519.PrivateKey
+	now    func() time.Time
+	store  *Store
+	rdb    *redis.Client
+	cfg    Config
+	dummy  string        // login sem conta compara com este hash: o tempo de resposta não revela se o email existe
+	argon  chan struct{} // 19 MiB por hash: o teto de hashes simultâneos impede uma rajada de logins de estourar a RAM
 	notify func(user string, exFriends []string)
-	// google troca o code do Google pela identidade (sub, email verificado). Campo para o teste trocar.
+	// google é campo para o teste trocar a ida ao Google.
 	google func(ctx context.Context, code string) (sub, email string, err error)
 }
 
-// normEmail: trim + minúsculas; ok = 3–254 bytes com um só @ e algo dos dois lados.
 func normEmail(raw string) (string, bool) {
 	e := strings.ToLower(strings.TrimSpace(raw))
 	local, domain, _ := strings.Cut(e, "@")
@@ -113,7 +110,7 @@ func (s *Service) register(ctx context.Context, email, password string) (tokens,
 	return s.issue(ctx, id)
 }
 
-// login: sem conta, conta só-Google e senha errada dão o mesmo erro no mesmo tempo (compara com s.dummy).
+// login: sem conta, conta só-Google e senha errada dão o mesmo erro no mesmo tempo.
 func (s *Service) login(ctx context.Context, email, password string) (tokens, error) {
 	e, _ := normEmail(email)
 	id, hash, _, err := s.store.userByEmail(ctx, e)
@@ -158,7 +155,6 @@ func (s *Service) logout(ctx context.Context, token string) error {
 	return err
 }
 
-// issue: login novo = família nova de refresh.
 func (s *Service) issue(ctx context.Context, userID string) (tokens, error) {
 	r := randomToken()
 	tv, err := s.store.newRefresh(ctx, userID, sha(r), s.now().Add(refreshTTL))
@@ -173,7 +169,6 @@ func (s *Service) withAccess(userID string, tv int, refresh string) (tokens, err
 	return tokens{Access: a, Refresh: refresh, ExpiresIn: int(accessTTL / time.Second)}, err
 }
 
-// accessToken: JWT EdDSA de 15 min, sub = id do usuário, tv = token_version.
 func (s *Service) accessToken(userID string, tv int) (string, error) {
 	now := s.now()
 	return jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims{jwt.RegisteredClaims{
@@ -183,8 +178,6 @@ func (s *Service) accessToken(userID string, tv int) (string, error) {
 	}, &tv}).SignedString(s.key)
 }
 
-// verify: assinatura EdDSA, exp, sub e tv obrigatórios, e tv == token_version do dono (uma leitura por PK).
-// Token ruim ou revogado → ErrUnauthorized; outro erro = banco fora.
 func (s *Service) verify(ctx context.Context, token string) (string, time.Time, error) {
 	var c claims
 	_, err := jwt.ParseWithClaims(token, &c, func(*jwt.Token) (any, error) { return s.key.Public(), nil },
@@ -202,8 +195,6 @@ func (s *Service) verify(ctx context.Context, token string) (string, time.Time, 
 	return c.Subject, c.ExpiresAt.Time, nil
 }
 
-// ---- senha (argon2id, formato PHC) ----
-
 var b64 = base64.RawStdEncoding
 
 func (s *Service) hashPassword(ctx context.Context, pw string) (string, error) {
@@ -214,7 +205,7 @@ func (s *Service) hashPassword(ctx context.Context, pw string) (string, error) {
 		b64.EncodeToString(salt), b64.EncodeToString(k)), err
 }
 
-// checkPassword relê os parâmetros do próprio hash (troca futura de parâmetros não invalida os antigos).
+// checkPassword lê os parâmetros do próprio hash: trocar os parâmetros não invalida as senhas antigas.
 func (s *Service) checkPassword(ctx context.Context, phc, pw string) (bool, error) {
 	f := strings.Split(phc, "$")
 	if len(f) != 6 || f[1] != "argon2id" || f[2] != fmt.Sprintf("v=%d", argon2.Version) {
@@ -248,8 +239,6 @@ func (s *Service) argon2(ctx context.Context, pw string, salt []byte, m, t uint3
 	return argon2.IDKey([]byte(pw), salt, t, m, p, n), nil
 }
 
-// ---- Google (api.md §2, PKCE) ----
-
 func validB64URL(s string) bool {
 	for _, c := range []byte(s) {
 		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
@@ -263,7 +252,7 @@ func (s *Service) redirectURI() string {
 	return strings.TrimRight(s.cfg.PublicURL, "/") + "/v1/auth/google/callback"
 }
 
-// googleStart guarda {challenge, state do app} sob um state do servidor e devolve a URL do Google.
+// googleStart guarda o challenge e o state do app sob um state nosso: o do app nunca vai ao Google.
 func (s *Service) googleStart(ctx context.Context, challenge, method, appState string) (string, error) {
 	if len(challenge) != 43 || !validB64URL(challenge) || method != "S256" ||
 		len(appState) < 16 || len(appState) > 128 || !validB64URL(appState) {
@@ -282,7 +271,6 @@ func (s *Service) googleStart(ctx context.Context, challenge, method, appState s
 	}.Encode(), nil
 }
 
-// takeState consome (uso único) o state do servidor: devolve o challenge e o state do app.
 func (s *Service) takeState(ctx context.Context, state string) (challenge, appState string, err error) {
 	v, err := s.rdb.GetDel(ctx, "gstate:"+state).Result()
 	if errors.Is(err, redis.Nil) || err == nil && len(v) < 43 {
@@ -294,7 +282,6 @@ func (s *Service) takeState(ctx context.Context, state string) (challenge, appSt
 	return v[:43], v[43:], nil
 }
 
-// googleLogin: code do Google → conta → código de uso único (60 s) para o app trocar no exchange.
 func (s *Service) googleLogin(ctx context.Context, challenge, googleCode string) (string, error) {
 	sub, raw, err := s.google(ctx, googleCode)
 	if err != nil {
@@ -312,8 +299,8 @@ func (s *Service) googleLogin(ctx context.Context, challenge, googleCode string)
 	return code, s.rdb.Set(ctx, "gcode:"+code, challenge+id, codeTTL).Err()
 }
 
-// googleUser: pelo sub; senão pelo email verificado (vincula, apaga a senha e revoga os refresh: defesa contra
-// pre-account hijacking, api.md §2); senão cria.
+// googleUser vincula pelo email verificado só uma conta sem sub, e a entrega limpa: o cadastro por senha não verifica
+// email, então quem cadastrou o email de outro perde o acesso quando o dono entra (pre-account hijacking).
 func (s *Service) googleUser(ctx context.Context, sub, email string) (string, error) {
 	id, err := s.store.userBySub(ctx, sub)
 	if err != nil || id != "" {
@@ -339,7 +326,6 @@ func (s *Service) googleUser(ctx context.Context, sub, email string) (string, er
 	return id, err
 }
 
-// googleExchange consome o código (GETDEL) e confere o PKCE em tempo constante.
 func (s *Service) googleExchange(ctx context.Context, code, verifier string) (tokens, error) {
 	if code == "" || verifier == "" {
 		return tokens{}, errBadRequest
@@ -360,7 +346,6 @@ func (s *Service) googleExchange(ctx context.Context, code, verifier string) (to
 
 var googleHTTP = &http.Client{Timeout: 10 * time.Second}
 
-// googleIdentity: troca o code no endpoint de token do Google e valida o ID token (assinatura, iss, aud, exp).
 func (s *Service) googleIdentity(ctx context.Context, code string) (string, string, error) {
 	form := url.Values{
 		"code":          {code},
@@ -380,7 +365,7 @@ func (s *Service) googleIdentity(ctx context.Context, code string) (string, stri
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("auth: google token %d", res.StatusCode) // sem o corpo
+		return "", "", fmt.Errorf("auth: google token %d", res.StatusCode)
 	}
 	var out struct {
 		IDToken string `json:"id_token"`
@@ -399,15 +384,12 @@ func (s *Service) googleIdentity(ctx context.Context, code string) (string, stri
 	return p.Subject, email, nil
 }
 
-// googleError: falha do lado Google (ou da regra de vínculo), com texto nosso ou da lib: pode ir inteiro para o log.
+// googleError: texto nosso ou da lib, sem dado do usuário: pode ir inteiro para o log.
 type googleError struct{ err error }
 
 func (e googleError) Error() string { return "google: " + e.err.Error() }
 func (e googleError) Unwrap() error { return e.err }
 
-// ---- util ----
-
-// randomToken: 32 bytes aleatórios em base64url sem padding.
 func randomToken() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)

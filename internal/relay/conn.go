@@ -16,18 +16,17 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
 
-// ---- buffers de saída ----
-
-// outBuf: um frame de saída codificado uma vez e compartilhado, sem cópia, por todas as filas que o recebem.
-// Contagem de referências: quem cria tem 1; cada fila soma 1; o último release devolve ao pool.
+// outBuf: frame codificado uma vez e compartilhado, sem cópia, pelas filas que o recebem. Quem cria tem 1 referência,
+// cada fila soma 1, e o último release devolve ao pool.
 type outBuf struct {
 	b    []byte
 	refs atomic.Int32
 }
 
 var (
-	outPool   = sync.Pool{New: func() any { return &outBuf{b: make([]byte, 0, 512)} }}
-	emptyPool = sync.Pool{New: func() any { return new(outBuf) }} // wrappers sem buffer (Buf/SendFriends)
+	outPool = sync.Pool{New: func() any { return &outBuf{b: make([]byte, 0, 512)} }}
+	// emptyPool guarda os wrappers que o Buf esvazia, para o SendFriends não alocar um novo.
+	emptyPool = sync.Pool{New: func() any { return new(outBuf) }}
 )
 
 func getOut() *outBuf {
@@ -37,7 +36,6 @@ func getOut() *outBuf {
 	return ob
 }
 
-// wrapOut adota b (posse transferida) num wrapper do pool.
 func wrapOut(b []byte) *outBuf {
 	ob := emptyPool.Get().(*outBuf)
 	ob.b = b
@@ -53,24 +51,22 @@ func (o *outBuf) release() {
 	}
 }
 
-// Buffers de leitura: um por mensagem, de volta ao pool depois de tratada (conexão parada não segura 64 KiB).
+// readPool: um buffer por mensagem, não por conexão: conexão parada não segura 64 KiB.
 var readPool = sync.Pool{New: func() any { b := make([]byte, 0, 1024); return &b }}
-
-// ---- fila de envio ----
 
 type item struct {
 	ob   *outBuf
-	drop bool // posição: descartável
+	drop bool // posição
 }
 
-// queue: anel de queueCap itens. O writer da conexão é o único consumidor.
+// queue: o writer da conexão é o único consumidor.
 type queue struct {
 	mu        sync.Mutex
 	items     [queueCap]item
 	head, n   int
 	closing   bool
 	closeCode int    // 0 = só fecha o socket
-	closeErr  string // Error{code} antes do close ("" = nenhum)
+	closeErr  string // "" = sem Error antes do close
 	wake      chan struct{}
 	space     chan struct{}
 }
@@ -82,8 +78,8 @@ func signal(ch chan struct{}) {
 	}
 }
 
-// push enfileira ob (a referência passa à fila). Cheia: tira a posição mais velha; sem posição para tirar, uma
-// posição nova é descartada e um envelope novo devolve false (quem chama fecha a conexão).
+// push: a referência passa à fila. Cheia, tira a posição mais velha; só com envelopes, uma posição nova é descartada
+// e um envelope novo devolve false (quem chama fecha a conexão: o envelope segue no Postgres).
 func (q *queue) push(ob *outBuf, drop bool) bool {
 	q.mu.Lock()
 	if q.closing {
@@ -103,7 +99,7 @@ func (q *queue) push(ob *outBuf, drop bool) bool {
 	return true
 }
 
-// pushWait: backlog, com contrapressão (espera vaga abaixo de backlogMax). false = conexão fechando.
+// pushWait: contrapressão do backlog. false = conexão fechando.
 func (q *queue) pushWait(ob *outBuf, done <-chan struct{}) bool {
 	for {
 		q.mu.Lock()
@@ -129,7 +125,7 @@ func (q *queue) pushWait(ob *outBuf, done <-chan struct{}) bool {
 	}
 }
 
-// evictDroppable tira a posição mais velha (com o lock). false = só envelopes na fila.
+// evictDroppable: chamar com q.mu. false = só envelopes na fila.
 func (q *queue) evictDroppable() bool {
 	for i := range q.n {
 		if j := (q.head + i) % queueCap; q.items[j].drop {
@@ -145,7 +141,6 @@ func (q *queue) evictDroppable() bool {
 	return false
 }
 
-// pop: próximo item (ob nil = vazia) ou closing.
 func (q *queue) pop() (item, bool) {
 	q.mu.Lock()
 	if q.closing {
@@ -165,17 +160,15 @@ func (q *queue) pop() (item, bool) {
 	return it, false
 }
 
-// ---- conexão ----
-
-// Conn: uma conexão WebSocket autenticada. 1 goroutine de leitura (readLoop) e 1 de escrita (writeLoop).
+// Conn: uma goroutine de leitura (readLoop) e uma de escrita (writeLoop).
 type Conn struct {
 	hub   *Hub
 	ws    *websocket.Conn
 	user  string
-	userB []byte // user em bytes, para os frames (sem converter a cada envio)
+	userB []byte // para montar frames sem converter a cada envio
 	u     *user
 	q     queue
-	done  chan struct{} // fechado quando o writer termina
+	done  chan struct{} // fecha quando o writer termina
 	exp   *time.Timer
 }
 
@@ -184,7 +177,6 @@ func newConn(h *Hub, ws *websocket.Conn) *Conn {
 		q: queue{wake: make(chan struct{}, 1), space: make(chan struct{}, 1)}}
 }
 
-// User: id do usuário autenticado.
 func (c *Conn) User() string { return c.user }
 
 func (c *Conn) setUser(id string) {
@@ -201,8 +193,7 @@ func (c *Conn) friend(peer []byte) bool {
 	return ok
 }
 
-// kill fecha a conexão: o writer manda Error{errCode} (se houver) e o close code (se ≠ 0) e fecha o socket.
-// O primeiro kill vale; os outros são ignorados. Não bloqueia.
+// kill: o primeiro vale. Não bloqueia: o writer manda o Error e o close e fecha o socket. code 0 = só fecha.
 func (c *Conn) kill(code int, errCode string) {
 	c.q.mu.Lock()
 	if c.q.closing {
@@ -220,7 +211,6 @@ func (c *Conn) kill(code int, errCode string) {
 	signal(c.q.space)
 }
 
-// sendError: Error{code} só para esta conexão; a conexão segue.
 func (c *Conn) sendError(code string) {
 	ob := getOut()
 	ob.b = wire.AppendError(ob.b, code)
@@ -277,7 +267,6 @@ func (c *Conn) writeClose() {
 
 var errText = errors.New("relay: mensagem de texto")
 
-// next lê a próxima mensagem inteira para *buf (reaproveitado). Texto → errText.
 func (c *Conn) next(buf *[]byte) ([]byte, error) {
 	typ, r, err := c.ws.NextReader()
 	if err != nil {
@@ -289,7 +278,7 @@ func (c *Conn) next(buf *[]byte) ([]byte, error) {
 	b := (*buf)[:0]
 	for {
 		if len(b) == cap(b) {
-			b = append(b, 0)[:len(b)] // cresce (o SetReadLimit põe o teto)
+			b = append(b, 0)[:len(b)] // o SetReadLimit põe o teto
 		}
 		n, err := r.Read(b[len(b):cap(b)])
 		b = b[:len(b)+n]
@@ -315,7 +304,7 @@ func (c *Conn) readLoop() {
 		buf := readPool.Get().(*[]byte)
 		msg, err := c.next(buf)
 		if err == nil {
-			c.handle(msg) // nada de msg sobrevive a isto: o buffer volta ao pool
+			c.handle(msg) // nada de msg sobrevive: o buffer volta ao pool
 		}
 		readPool.Put(buf)
 		if errors.Is(err, errText) {
@@ -323,13 +312,12 @@ func (c *Conn) readLoop() {
 			return
 		}
 		if err != nil {
-			c.kill(0, "") // queda, close do cliente ou 1009 (o gorilla já mandou)
+			c.kill(0, "") // o 1009 o gorilla já mandou
 			return
 		}
 	}
 }
 
-// auth: o 1º frame tem de ser Auth em authWait; registra a conexão e dispara o backlog.
 func (c *Conn) auth() bool {
 	h := c.hub
 	_ = c.ws.SetReadDeadline(time.Now().Add(h.authWait))
@@ -362,7 +350,7 @@ func (c *Conn) auth() bool {
 		return false
 	}
 	c.setUser(id)
-	// a conexão vence com o token: logout/reuso/vínculo derrubam o WS em ≤ 15 min mesmo sem o Kick
+	// a conexão vence com o token: uma revogação derruba o WS em ≤ 15 min mesmo se o Kick se perder
 	c.exp = time.AfterFunc(time.Until(exp), func() { c.kill(websocket.ClosePolicyViolation, "unauthorized") })
 	if h.beforeRegister != nil {
 		h.beforeRegister()
@@ -371,16 +359,16 @@ func (c *Conn) auth() bool {
 	if h.cl != nil { // cluster: o que outra instância publicar daqui em diante já chega a esta conexão
 		h.cl.wait(id, subWait)
 	}
-	// Corte do backlog lido logo depois do register: o que for gravado daqui em diante já sai ao vivo para esta
-	// conexão; o backlog manda só até aqui (sem isso, tudo que chegasse durante o Auth sairia em dobro).
+	// Corte do backlog logo depois do register: o que for gravado daqui em diante já sai ao vivo; sem o corte, tudo que
+	// chegasse durante o Auth sairia em dobro.
 	cutoff, err := h.store.maxID(ctx, id)
 	if err != nil {
 		logDB("relay: auth", err)
 		c.kill(websocket.CloseInternalServerErr, "")
 		return false
 	}
-	// Já registrado: a lista de amigos e o token são lidos agora. Uma mudança de amizade (ReloadFriends) ou revogação
-	// (Kick) que comitou antes do register não acharia esta conexão; depois dele, ela é vista pelos dois caminhos.
+	// Amigos e token relidos depois do register: um ReloadFriends ou Kick que comitou antes dele não acharia esta
+	// conexão.
 	if h.reload(c.u, id) != nil {
 		c.kill(websocket.CloseInternalServerErr, "")
 		return false
@@ -397,7 +385,6 @@ func (c *Conn) auth() bool {
 	return true
 }
 
-// finish: espera o writer (que fecha o socket) e sai do registro.
 func (c *Conn) finish() {
 	c.kill(0, "")
 	<-c.done
@@ -409,8 +396,6 @@ func (c *Conn) finish() {
 	}
 }
 
-// backlog manda a fila pendente até upTo, mais antigos primeiro, em páginas, com contrapressão (nunca fecha por
-// backlog).
 func (c *Conn) backlog(upTo int64) {
 	var after int64
 	for {
@@ -435,7 +420,7 @@ func (c *Conn) backlog(upTo int64) {
 	}
 }
 
-// validMsgID: o Postgres guarda client_msg_id como text: UTF-8 válido e sem NUL.
+// validMsgID: client_msg_id é text no Postgres, que recusa UTF-8 inválido e NUL.
 func validMsgID(id []byte) bool {
 	for _, b := range id {
 		if b == 0 {
@@ -445,7 +430,7 @@ func validMsgID(id []byte) bool {
 	return utf8.Valid(id)
 }
 
-// handle trata um frame C→S. f fatia msg: nada dele é guardado nem enfileirado (frames de saída são codificados).
+// handle: f fatia msg; nada dele pode ser guardado nem enfileirado.
 func (c *Conn) handle(msg []byte) {
 	f, err := wire.Decode(msg)
 	switch {
@@ -463,7 +448,7 @@ func (c *Conn) handle(msg []byte) {
 		c.ack(f)
 	case f.Type == wire.Location || f.Type == wire.LocationOff && f.Peer == nil:
 		c.hub.onLocation(c, f)
-	default: // só S→C (LocationUpdate, LocationOff com from, Error) ou Auth repetido
+	default: // o wire.Decode não sabe de direção: tipos só do servidor e Auth repetido
 		c.sendError("bad_frame")
 	}
 }

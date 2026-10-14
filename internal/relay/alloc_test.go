@@ -11,7 +11,7 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
 
-// Caminho quente: Envelope de A para B (amigos), Ack para A e repasse para B. 0 alocações fora o Postgres.
+// Meta: 0 alocações por frame repassado (o INSERT no Postgres fica de fora).
 func TestZeroAllocs(t *testing.T) {
 	h := New(nil, nil, nil)
 	const a, b = "0b9f8c56-0d7e-4c1f-9a39-3c0d1e8e7a11", "1c0f9d67-1e8f-4d20-8b4a-4d1e2f9f8b22"

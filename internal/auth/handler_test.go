@@ -20,7 +20,7 @@ func testKey() string {
 	return base64.StdEncoding.EncodeToString(seed)
 }
 
-// Handler só com a chave (sem Postgres/Redis): suficiente para o middleware.
+// keyOnlyHandler: sem Postgres nem Redis; serve para assinar tokens.
 func keyOnlyHandler(t *testing.T) *Handler {
 	t.Helper()
 	h, err := New(Config{SigningKey: testKey()}, nil, nil)

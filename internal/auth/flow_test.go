@@ -191,7 +191,6 @@ func TestRateLimit(t *testing.T) {
 	e := newEnv(t)
 	t0 := time.Now() // relógio parado: o argon2 sob -race leva segundos e o balde recarregaria
 	e.h.svc.now = func() time.Time { return t0 }
-	// por email, IPs diferentes
 	for i := range 5 {
 		if w := e.post("/v1/auth/login", cred("alvo@ex.com", "x")); w.Code != 401 {
 			t.Fatalf("tentativa %d: %d", i+1, w.Code)
@@ -199,7 +198,7 @@ func TestRateLimit(t *testing.T) {
 	}
 	wantErr(t, e.post("/v1/auth/login", cred("ALVO@ex.com", "x")), 429, "rate_limited")
 
-	// por IP, emails diferentes; register e login contam juntos
+	// register e login contam juntos no mesmo IP
 	e.addr = "203.0.113.7:1000"
 	for i := range 3 {
 		e.post("/v1/auth/login", cred(fmt.Sprintf("u%d@ex.com", i), "x"))
@@ -220,8 +219,8 @@ func TestRateLimit(t *testing.T) {
 
 func TestClientIP(t *testing.T) {
 	for _, c := range []struct{ remote, xff, want string }{
-		{"198.18.0.1:5", "", "198.18.0.1"},   // sem Caddy (teste): o RemoteAddr
-		{"10.0.0.2:5", "1.2.3.4", "1.2.3.4"}, // Caddy: o XFF, nunca o RemoteAddr
+		{"198.18.0.1:5", "", "198.18.0.1"},
+		{"10.0.0.2:5", "1.2.3.4", "1.2.3.4"},
 		{"198.18.0.1:5", "1.2.3.4", "1.2.3.4"},
 		{"172.18.0.3:5", "9.9.9.9, 1.2.3.4", "1.2.3.4"},
 		{"127.0.0.1:5", "lixo", "127.0.0.1"},
@@ -259,10 +258,10 @@ func TestRefresh(t *testing.T) {
 
 	other := wantTokens(t, e.post("/v1/auth/login", cred("caio@ex.com", "senha-forte-1")), 200)
 
-	wantErr(t, refresh(r1.Refresh), 401, "unauthorized") // reuso: revoga a família e mata os access
+	wantErr(t, refresh(r1.Refresh), 401, "unauthorized") // reuso
 	wantErr(t, e.req("GET", "/v1/me", "", r3.Access), 401, "unauthorized")
 	wantErr(t, refresh(r3.Refresh), 401, "unauthorized")
-	wantTokens(t, refresh(other.Refresh), 200) // outra família (outro login) segue viva
+	wantTokens(t, refresh(other.Refresh), 200) // outro login, outra família
 
 	wantErr(t, refresh("desconhecido"), 401, "unauthorized")
 	wantErr(t, e.post("/v1/auth/refresh", `{}`), 401, "unauthorized")
@@ -280,13 +279,13 @@ func TestLogout(t *testing.T) {
 	r1 := e.register("eva@ex.com")
 	e.me(r1.Access)
 	b, _ := json.Marshal(map[string]string{"refresh_token": r1.Refresh})
-	for range 2 { // idempotente
+	for range 2 {
 		if w := e.post("/v1/auth/logout", string(b)); w.Code != 204 {
 			t.Fatalf("logout: %d", w.Code)
 		}
 	}
 	wantErr(t, e.post("/v1/auth/refresh", string(b)), 401, "unauthorized")
-	wantErr(t, e.req("GET", "/v1/me", "", r1.Access), 401, "unauthorized") // o access para de valer na hora
+	wantErr(t, e.req("GET", "/v1/me", "", r1.Access), 401, "unauthorized")
 	if w := e.post("/v1/auth/logout", `{"refresh_token":"lixo"}`); w.Code != 204 {
 		t.Fatalf("logout lixo: %d", w.Code)
 	}
@@ -304,8 +303,6 @@ func TestMeDeletedUser(t *testing.T) {
 	wantErr(t, e.req("GET", "/v1/me", "", ""), 401, "unauthorized")
 }
 
-// ---- Google ----
-
 func pkce() (verifier, challenge string) {
 	verifier = strings.Repeat("v", 20) + fmt.Sprint(ipSeq.Add(1)) + strings.Repeat("w", 30)
 	sum := sha256.Sum256([]byte(verifier))
@@ -321,7 +318,6 @@ func fakeGoogle(_ context.Context, code string) (string, string, error) {
 	return sub, email, nil
 }
 
-// googleLogin roda start → callback → devolve a URL de volta ao app.
 func (e *env) googleCallback(googleCode, challenge, appState string) *url.URL {
 	e.t.Helper()
 	w := e.req("GET", "/v1/auth/google/start?code_challenge="+challenge+"&code_challenge_method=S256&state="+appState, "", "")
@@ -422,9 +418,8 @@ func TestGoogleLogin(t *testing.T) {
 	if m.Email == nil || *m.Email != "gil@ex.com" || !crockford.MatchString(m.FriendCode) {
 		t.Fatalf("me = %+v", m)
 	}
-	wantErr(t, e.exchange(code, v), 400, "invalid_grant") // uso único
+	wantErr(t, e.exchange(code, v), 400, "invalid_grant")
 
-	// mesmo sub → mesma conta
 	v2, ch2 := pkce()
 	back = e.googleCallback("sub-1|gil@ex.com", ch2, "app-state-0000002")
 	if e.me(wantTokens(t, e.exchange(back.Query().Get("code"), v2), 200).Access).ID != m.ID {
@@ -471,7 +466,7 @@ func TestGoogleLinksVerifiedEmail(t *testing.T) {
 	if e.me(tr.Access).ID != id {
 		t.Fatal("não vinculou pelo email")
 	}
-	wantErr(t, e.req("GET", "/v1/me", "", squatter.Access), 401, "unauthorized") // access velho morre na hora
+	wantErr(t, e.req("GET", "/v1/me", "", squatter.Access), 401, "unauthorized")
 	b, _ := json.Marshal(map[string]string{"refresh_token": squatter.Refresh})
 	wantErr(t, e.post("/v1/auth/refresh", string(b)), 401, "unauthorized")
 	wantErr(t, e.post("/v1/auth/login", cred("hugo@ex.com", "senha-forte-1")), 401, "invalid_credentials")
@@ -483,9 +478,9 @@ func TestGoogleLinksVerifiedEmail(t *testing.T) {
 		}
 	}
 	b, _ = json.Marshal(map[string]string{"refresh_token": tr.Refresh})
-	wantTokens(t, e.post("/v1/auth/refresh", string(b)), 200) // a sessão do Google sobrevive
+	wantTokens(t, e.post("/v1/auth/refresh", string(b)), 200)
 
-	// email já vinculado a OUTRO sub: não sequestra a conta
+	// email já vinculado a outro sub: nunca sobrescreve
 	v, ch = pkce()
 	back = e.googleCallback("sub-outro|hugo@ex.com", ch, "app-state-hugo-02")
 	if back.Query().Get("error") != "google_failed" {
@@ -493,7 +488,6 @@ func TestGoogleLinksVerifiedEmail(t *testing.T) {
 	}
 }
 
-// Banco fora → 503 unavailable; e nenhum log carrega email, senha ou token.
 // Sem t.Parallel: troca o slog global (os testes paralelos só rodam depois dos em série).
 func TestUnavailableAndNoLeak(t *testing.T) {
 	var buf bytes.Buffer
@@ -542,7 +536,6 @@ func TestCleanup(t *testing.T) {
 	}
 }
 
-// Verify: o que o Auth do WS (S6) usa. Devolve o dono e o vencimento; depois do logout, ErrUnauthorized.
 func TestVerify(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -565,7 +558,6 @@ func TestVerify(t *testing.T) {
 	}
 }
 
-// Semáforo do argon2 lotado por ~2 s → 503 (não enfileira RAM sem fim).
 func TestArgonBusy(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -579,9 +571,6 @@ func TestArgonBusy(t *testing.T) {
 	}
 }
 
-// ---- corridas entre rotação e revogação (READ COMMITTED) ----
-
-// waitLockWait espera alguma sessão deste banco ficar parada esperando lock.
 func waitLockWait(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
@@ -597,8 +586,8 @@ func waitLockWait(t *testing.T, pool *pgxpool.Pool) {
 	t.Fatal("ninguém esperou o lock")
 }
 
-// rotating abre uma rotação em voo de tok (mesmo protocolo do rotate: usuário, depois token) que já inseriu o
-// sucessor; fire roda em paralelo e tem de esperar; devolve o sucessor depois do commit e do fim de fire.
+// rotating segura uma rotação de tok em voo (mesmas travas do rotate, sucessor já inserido) enquanto fire roda; fire
+// tem de esperar por ela.
 func rotating(t *testing.T, e *env, tok string, fire func()) string {
 	t.Helper()
 	ctx := context.Background()
@@ -641,7 +630,7 @@ func (e *env) refreshCode(tok string) int {
 	return e.post("/v1/auth/refresh", string(b)).Code
 }
 
-// Logout do dono enquanto o ladrão rotaciona o refresh roubado: o sucessor não sobrevive.
+// Logout do dono enquanto o ladrão rotaciona o refresh roubado.
 func TestLogoutDuringRotation(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -656,7 +645,6 @@ func TestLogoutDuringRotation(t *testing.T) {
 	}
 }
 
-// Reuso de um refresh velho enquanto o portador atual rotaciona: a família inteira morre, sucessor incluso.
 func TestReuseDuringRotation(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -669,7 +657,6 @@ func TestReuseDuringRotation(t *testing.T) {
 	}
 }
 
-// Vínculo Google enquanto o invasor rotaciona: a conta entregue ao dono não guarda refresh do invasor.
 func TestLinkDuringRotation(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -681,7 +668,7 @@ func TestLinkDuringRotation(t *testing.T) {
 	}
 }
 
-// O lado do rotate: com uma revogação em voo (UPDATE users feito, DELETE ainda não), o refresh espera e dá 401.
+// Revogação em voo com o UPDATE users feito e o DELETE ainda não.
 func TestRotationDuringRevoke(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -697,7 +684,7 @@ func TestRotationDuringRevoke(t *testing.T) {
 	}
 	codes := make(chan int, 1)
 	go func() { codes <- e.refreshCode(r.Refresh) }()
-	waitLockWait(t, e.pool) // o refresh tem de esperar já no usuário, antes de a revogação apagar
+	waitLockWait(t, e.pool)
 	if _, err := tx.Exec(ctx, `DELETE FROM refresh_tokens`); err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +696,6 @@ func TestRotationDuringRevoke(t *testing.T) {
 	}
 }
 
-// Hooks para o relay (o main liga OnRevoke → hub.Kick e OnFriendsChange → hub.ReloadFriends dos dois).
 func TestHooks(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -720,7 +706,6 @@ func TestHooks(t *testing.T) {
 	e.h.OnFriendsChange = func(a, b string) { mu.Lock(); got = append(got, "friends "+a+" "+b); mu.Unlock() }
 	take := func() []string { mu.Lock(); defer mu.Unlock(); g := got; got = nil; return g }
 
-	// logout
 	r := e.register("hk1@ex.com")
 	id := e.me(r.Access).ID
 	b, _ := json.Marshal(map[string]string{"refresh_token": r.Refresh})
@@ -728,12 +713,11 @@ func TestHooks(t *testing.T) {
 	if g := take(); len(g) != 1 || g[0] != "revoke "+id {
 		t.Fatalf("logout: %v", g)
 	}
-	e.post("/v1/auth/logout", string(b)) // token já revogado: nada
+	e.post("/v1/auth/logout", string(b))
 	if g := take(); len(g) != 0 {
 		t.Fatalf("logout repetido: %v", g)
 	}
 
-	// reuso
 	r = e.register("hk2@ex.com")
 	id = e.me(r.Access).ID
 	e.refreshCode(r.Refresh)
@@ -742,7 +726,6 @@ func TestHooks(t *testing.T) {
 		t.Fatalf("reuso: %v", g)
 	}
 
-	// vínculo: revoga e avisa cada ex-amigo; apaga envelopes nos dois sentidos
 	r = e.register("hk3@ex.com")
 	id = e.me(r.Access).ID
 	f1, f2 := e.me(e.register("hk4@ex.com").Access).ID, e.me(e.register("hk5@ex.com").Access).ID

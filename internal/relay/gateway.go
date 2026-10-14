@@ -1,6 +1,5 @@
-// Package relay: gateway WebSocket (/v1/ws) e fila de envelopes cifrados (docs/api.md §5 e §6). Caminho quente sem
-// camadas: o frame chega, é validado e repassado, sem virar entidade. Posição (Location/LocationOff) vai para o
-// onLocation (S7, pacote location); o relay não importa o location.
+// Package relay: WebSocket (/v1/ws) e fila de envelopes cifrados (docs/api.md §5 e §6). Caminho quente sem camadas: o
+// frame é validado e repassado sem virar entidade. Posição vai para o onLocation; o relay não importa o location.
 package relay
 
 import (
@@ -24,28 +23,27 @@ import (
 
 const (
 	shardCount = 64
-	maxConns   = 4            // por usuário; a 5ª derruba a mais antiga
-	queueCap   = 64           // fila de envio por conexão
-	backlogMax = queueCap / 2 // o backlog nunca ocupa mais que isto: sobra vaga para o ao vivo
-	readLimit  = 64 << 10     // mensagem WS
-	pageSize   = 50           // backlog e GET /v1/envelopes
-	pageBytes  = 48 << 10     // JSON do GET /v1/envelopes
-	maxAckIDs  = 100          // POST /v1/envelopes/ack
+	maxConns   = 4 // por usuário; a 5ª derruba a mais antiga
+	queueCap   = 64
+	backlogMax = queueCap / 2 // o backlog nunca lota a fila: sobra vaga para o ao vivo
+	readLimit  = 64 << 10
+	pageSize   = 50
+	pageBytes  = 48 << 10 // o app lê no máximo 64 KiB por resposta
+	maxAckIDs  = 100
 	pingEvery  = 30 * time.Second
-	idleWait   = 70 * time.Second // sem nada (nem pong) por 2 pings: conexão morta
+	idleWait   = 70 * time.Second // dois pings sem resposta
 	writeWait  = 10 * time.Second
 	dbWait     = 5 * time.Second
 )
 
-// Hub: conexões online (fatiadas em shards com lock próprio) e a fila de envelopes.
 type Hub struct {
 	store      *Store
 	verify     func(ctx context.Context, token string) (string, time.Time, error)
 	onLocation func(c *Conn, f wire.Frame)
 	up         websocket.Upgrader
 	shards     [shardCount]shard
-	authWait   time.Duration // 1º frame (Auth); campo para o teste encurtar
-	// beforeRegister: gancho de teste (nil em produção) para simular uma mudança de amizade durante o Auth.
+	authWait   time.Duration // campo para o teste encurtar
+	// beforeRegister: gancho de teste (nil em produção).
 	beforeRegister func()
 	cl             *cluster // nil = uma instância só (EnableCluster liga)
 }
@@ -55,15 +53,15 @@ type shard struct {
 	users map[string]*user
 }
 
-// user: conexões deste usuário aqui (a mais antiga primeiro) e os amigos aceitos, compartilhados por elas.
-// reload serializa as recargas da lista (ler o banco e gravar sob ele): a última gravada é sempre a lida por último.
+// user: conexões em ordem de chegada. reload serializa as recargas da lista (ler o banco e gravar sob a trava): a
+// última gravada é sempre a lida por último.
 type user struct {
 	conns   []*Conn
 	friends atomic.Pointer[friendSet]
 	reload  sync.Mutex
 }
 
-// friendSet: imutável; troca inteira no ReloadFriends. ids para o fan-out, has para a checagem do Envelope.
+// friendSet: imutável; o ReloadFriends troca o conjunto inteiro.
 type friendSet struct {
 	ids [][]byte
 	has map[string]struct{}
@@ -78,7 +76,7 @@ func newFriendSet(ids []string) *friendSet {
 	return fs
 }
 
-// New: verify valida o access token (auth.Handler.Verify); onLocation recebe os frames Location e LocationOff C→S.
+// New: onLocation recebe os frames Location e LocationOff do cliente.
 func New(pool *pgxpool.Pool, verify func(ctx context.Context, token string) (string, time.Time, error),
 	onLocation func(c *Conn, f wire.Frame)) *Hub {
 	h := &Hub{store: &Store{pool: pool}, verify: verify, onLocation: onLocation, authWait: 5 * time.Second}
@@ -86,7 +84,7 @@ func New(pool *pgxpool.Pool, verify func(ctx context.Context, token string) (str
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		WriteBufferPool: &sync.Pool{},
-		// O app não manda Origin; navegador sempre manda: recusa (nada de WS cross-site com cookie alheio).
+		// O app não manda Origin e navegador sempre manda: recusar fecha a porta a WS cross-site.
 		CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" },
 	}
 	for i := range h.shards {
@@ -95,17 +93,17 @@ func New(pool *pgxpool.Pool, verify func(ctx context.Context, token string) (str
 	return h
 }
 
-// Routes: /v1/ws sem authed (o Auth vem no 1º frame); a fila REST com authed.
+// Routes: /v1/ws fica fora do authed porque o token vem no primeiro frame, nunca na URL (não cai em log).
 func (h *Hub) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
 	mux.HandleFunc("GET /v1/ws", h.serveWS)
 	mux.Handle("GET /v1/envelopes", authed(h.listEnvelopes))
 	mux.Handle("POST /v1/envelopes/ack", authed(h.ackEnvelopes))
 }
 
-// Cleanup apaga envelopes com mais de 30 dias. Para a limpeza diária (main).
+// Cleanup apaga envelopes com mais de 30 dias.
 func (h *Hub) Cleanup(ctx context.Context) error { return h.store.cleanup(ctx) }
 
-// fnv: FNV-1a, sem alocar, para string ou []byte (o mesmo id cai no mesmo shard).
+// fnv: o mesmo id cai no mesmo shard, venha como string ou []byte.
 func fnv[T string | []byte](id T) uint32 {
 	x := uint32(2166136261)
 	for i := 0; i < len(id); i++ {
@@ -117,8 +115,8 @@ func fnv[T string | []byte](id T) uint32 {
 
 func (h *Hub) shardOf(id uint32) *shard { return &h.shards[id%shardCount] }
 
-// register põe a conexão no registro. A lista de amigos NÃO vem daqui (seria lida antes e poderia sobrescrever uma
-// recarga mais nova): quem registra chama reloadLocal depois. fs só serve a testes sem banco.
+// register não grava a lista de amigos: lida antes do registro, ela poderia sobrescrever uma recarga mais nova. Quem
+// registra recarrega depois. fs só serve a testes sem banco.
 func (h *Hub) register(c *Conn, fs *friendSet) {
 	s := h.shardOf(fnv(c.user))
 	s.mu.Lock()
@@ -163,7 +161,6 @@ func (h *Hub) unregister(c *Conn) {
 	}
 }
 
-// online: quantas conexões o usuário tem aqui.
 func (h *Hub) online(id string) int {
 	s := h.shardOf(fnv(id))
 	s.mu.Lock()
@@ -193,7 +190,7 @@ func (h *Hub) deliverLocal(user []byte, ob *outBuf, droppable bool) {
 		for _, c := range u.conns {
 			ob.ref()
 			if !c.q.push(ob, droppable) {
-				full = append(full, c) // raro: só aloca quando um cliente travou
+				full = append(full, c) // só aloca quando um cliente travou
 			}
 		}
 	}
@@ -203,8 +200,7 @@ func (h *Hub) deliverLocal(user []byte, ob *outBuf, droppable bool) {
 	}
 }
 
-// relayEnvelope: depois de gravado, Ack ao remetente (todas as conexões dele) e, se for novo, o Envelope ao
-// destinatário. Os dois frames são codificados em buffers do pool, nunca fatias do buffer de leitura.
+// relayEnvelope codifica frames novos: f fatia o buffer de leitura, que volta ao pool quando esta chamada retorna.
 func (h *Hub) relayEnvelope(from *Conn, f wire.Frame, fresh bool) {
 	ack := getOut()
 	ack.b = wire.AppendAck(ack.b, f.Peer, f.MsgID)
@@ -219,7 +215,7 @@ func (h *Hub) relayEnvelope(from *Conn, f wire.Frame, fresh bool) {
 	env.release()
 }
 
-// Buf: buffer vazio do pool do Hub para montar um frame que vai ao SendFriends (0 alocações em regime).
+// Buf: buffer do pool do Hub para montar o frame do SendFriends.
 func Buf() []byte {
 	ob := getOut()
 	b := ob.b
@@ -228,9 +224,8 @@ func Buf() []byte {
 	return b
 }
 
-// SendFriends entrega frame, como posição (descartável), a todas as conexões online dos amigos aceitos de user.
-// A posse de frame passa ao Hub: um buffer só, compartilhado pelos destinatários e reciclado no fim; quem chama não
-// o toca mais (monte com wire.Append*(relay.Buf(), …)).
+// SendFriends entrega frame como posição (descartável) aos amigos online de user. A posse de frame passa ao Hub: é
+// compartilhado pelas filas e reciclado no fim, então quem chama não o toca mais.
 func (h *Hub) SendFriends(user string, frame []byte) {
 	ob := wrapOut(frame)
 	h.sendFriends(user, ob)
@@ -252,7 +247,6 @@ func (h *Hub) sendFriends(id string, ob *outBuf) {
 	ob.release()
 }
 
-// ReloadFriends recarrega a lista de amigos em memória de user, se ele tiver conexão aqui (evento de amizade).
 // ponytail: síncrono (o 204 do friends espera a leitura, até dbWait com o Postgres lento); se pesar, chamar em
 // goroutine: a serialização por usuário (user.reload) já garante a ordem.
 func (h *Hub) ReloadFriends(user string) {
@@ -262,7 +256,7 @@ func (h *Hub) ReloadFriends(user string) {
 	}
 }
 
-// Kick derruba todas as conexões de user com Error{unauthorized} + 1008 (revogação: logout, reuso, vínculo).
+// Kick derruba todas as conexões de user com Error{unauthorized} + 1008.
 func (h *Hub) Kick(user string) {
 	h.kickLocal(user)
 	if h.cl != nil {
@@ -281,7 +275,6 @@ func (h *Hub) reloadLocal(id string) {
 	}
 }
 
-// reload relê os amigos de id e troca a lista de u, sob u.reload.
 func (h *Hub) reload(u *user, id string) error {
 	u.reload.Lock()
 	defer u.reload.Unlock()
@@ -312,15 +305,13 @@ func (h *Hub) kickLocal(id string) {
 func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	ws, err := h.up.Upgrade(w, r, nil)
 	if err != nil {
-		return // o Upgrade já respondeu (403 no Origin, 400 sem upgrade)
+		return // o Upgrade já respondeu
 	}
 	ws.SetReadLimit(readLimit)
 	c := newConn(h, ws)
 	go c.writeLoop()
 	c.readLoop()
 }
-
-// ---- REST (api.md §5) ----
 
 func (h *Hub) listEnvelopes(w http.ResponseWriter, r *http.Request) {
 	page, err := h.store.page(r.Context(), httpx.User(r.Context()), 0, math.MaxInt64, pageSize)
@@ -330,7 +321,7 @@ func (h *Hub) listEnvelopes(w http.ResponseWriter, r *http.Request) {
 	}
 	size := 16 // {"envelopes":[]}
 	for i, e := range page {
-		// base64 = 4/3 do payload; o resto (id, from, client_msg_id e as chaves) cabe em 160 bytes
+		// base64 cresce 4/3; id, from e as chaves cabem em 160 bytes; client_msg_id pode virar \u00XX
 		size += (len(e.Payload)+2)/3*4 + len(e.ClientMsgID)*6 + 160
 		if size > pageBytes && i > 0 {
 			page = page[:i]
@@ -370,7 +361,7 @@ func (h *Hub) ackEnvelopes(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// logDB: como o httpx.DBError, sem a mensagem (o Postgres pode ecoar entrada).
+// logDB: sem a mensagem, que o Postgres pode ecoar da entrada.
 func logDB(msg string, err error) {
 	if errors.Is(err, context.Canceled) {
 		return

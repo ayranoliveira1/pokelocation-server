@@ -12,7 +12,6 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/friends"
 )
 
-// Store: Postgres do auth. Concreto, sem interface: os testes usam Postgres real (testdb).
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -24,11 +23,11 @@ func uniqueViolation(err error, constraint string) bool {
 	return errors.As(err, &pg) && pg.Code == "23505" && pg.ConstraintName == constraint
 }
 
-// createUser insere o usuário com um friend_code novo (repete se colidir). nil = NULL.
+// createUser: nil = NULL.
 func (s *Store) createUser(ctx context.Context, email, hash, sub *string) (string, error) {
 	var id string
 	var err error
-	for range 5 { // 32^8 códigos: colisão é raríssima; o teto só evita laço infinito
+	for range 5 { // colisão em 32^8 é raríssima; o teto só evita laço infinito
 		err = s.pool.QueryRow(ctx, `INSERT INTO users (email, password_hash, google_sub, friend_code)
 			VALUES ($1, $2, $3, $4) RETURNING id`, email, hash, sub, friends.NewCode()).Scan(&id)
 		if uniqueViolation(err, "users_email_key") {
@@ -41,7 +40,7 @@ func (s *Store) createUser(ctx context.Context, email, hash, sub *string) (strin
 	return id, err
 }
 
-// userByEmail: id "" se não existe. hash/sub nil = NULL.
+// userByEmail: id "" se não existe.
 func (s *Store) userByEmail(ctx context.Context, email string) (id string, hash, sub *string, err error) {
 	err = s.pool.QueryRow(ctx, `SELECT id, password_hash, google_sub FROM users WHERE email = $1`, email).
 		Scan(&id, &hash, &sub)
@@ -51,7 +50,6 @@ func (s *Store) userByEmail(ctx context.Context, email string) (id string, hash,
 	return id, hash, sub, err
 }
 
-// userBySub: "" se não existe.
 func (s *Store) userBySub(ctx context.Context, sub string) (string, error) {
 	var id string
 	err := s.pool.QueryRow(ctx, `SELECT id FROM users WHERE google_sub = $1`, sub).Scan(&id)
@@ -61,7 +59,7 @@ func (s *Store) userBySub(ctx context.Context, sub string) (string, error) {
 	return id, err
 }
 
-// version: token_version do usuário. Inexistente (ou id que nem é uuid) → errNotFound.
+// version: id que nem é uuid também é errNotFound (o sub vem do token, não do banco).
 func (s *Store) version(ctx context.Context, id string) (int, error) {
 	var v int
 	err := s.pool.QueryRow(ctx, `SELECT token_version FROM users WHERE id = $1`, id).Scan(&v)
@@ -72,15 +70,14 @@ func (s *Store) version(ctx context.Context, id string) (int, error) {
 	return v, err
 }
 
-// linkGoogle vincula o sub a uma conta sem sub e a entrega limpa ao dono do email (api.md §2): apaga a senha, mata os
-// access (token_version), refresh, amizades, bloqueios, aparelho e prekeys. false = a conta já tem outro sub.
+// linkGoogle entrega a conta limpa: nada que o dono antigo do email deixou (senha, sessões, amigos, chaves, fila)
+// sobrevive. false = a conta já tem outro sub. Devolve os ex-amigos: as listas em memória deles têm de ser recarregadas.
 // UPDATE users antes dos DELETE: espera a rotação em voo (ver rotate).
-// ponytail: sem o advisory lock dos pares do friends; um pedido de amizade do invasor já autenticado e em voo pode
+// ponytail: sem os advisory locks de par do friends; um pedido de amizade do invasor já autenticado e em voo pode
 // gravar depois do DELETE. Janela de milissegundos; travar cada par (pg_advisory_xact_lock) se virar caso real.
 // ponytail: idem para um login do invasor com a senha velha que passa no argon2 logo antes do vínculo e grava a família
 // logo depois (login tem 5/min por email). Se virar caso real: no login, gravar o refresh com
 // INSERT … SELECT … FROM users WHERE id = $1 AND password_hash = $2 FOR NO KEY UPDATE (0 linhas → invalid_credentials).
-// Devolve os ex-amigos (pedidos inclusos): a lista de amigos em memória deles no relay tem de ser recarregada.
 func (s *Store) linkGoogle(ctx context.Context, id, sub string) (bool, []string, error) {
 	ok := false
 	var ex []string
@@ -126,7 +123,7 @@ func (s *Store) me(ctx context.Context, id string) (email *string, code string, 
 	return email, code, err
 }
 
-// newRefresh abre uma família nova (um login) e devolve o token_version para o access.
+// newRefresh: família nova (um login).
 func (s *Store) newRefresh(ctx context.Context, userID string, hash []byte, exp time.Time) (int, error) {
 	var v int
 	err := s.pool.QueryRow(ctx, `WITH r AS (
@@ -141,8 +138,8 @@ func (s *Store) newRefresh(ctx context.Context, userID string, hash []byte, exp 
 // novo = snapshot novo em READ COMMITTED) enxerga o sucessor que ela inseriu; e uma rotação que chega depois espera a
 // revogação e não acha mais o token. Ordem fixa: sem deadlock.
 
-// rotate troca old por next na mesma família e devolve o dono e o token_version. owner "" = desconhecido, vencido ou
-// reusado; reuso apaga a família inteira, mata os access do dono (token_version+1) e o devolve em revoked.
+// rotate: owner "" = desconhecido, vencido ou reusado. Reuso apaga a família inteira e mata os access do dono, que
+// volta em revoked.
 func (s *Store) rotate(ctx context.Context, old, next []byte, now, exp time.Time) (owner string, version int,
 	revoked string, err error) {
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -154,7 +151,7 @@ func (s *Store) rotate(ctx context.Context, old, next []byte, now, exp time.Time
 		if err == nil {
 			err = tx.QueryRow(ctx, `SELECT token_version FROM users WHERE id = $1 FOR NO KEY UPDATE`, user).Scan(&v)
 		}
-		if err == nil { // relido sob a trava do usuário: uma revogação que commitou enquanto esperávamos já o apagou
+		if err == nil { // relido sob a trava: uma revogação que comitou enquanto esperávamos já o apagou
 			err = tx.QueryRow(ctx, `SELECT family_id, expires_at, used_at FROM refresh_tokens
 				WHERE token_hash = $1 FOR UPDATE`, old).Scan(&family, &expires, &used)
 		}
@@ -189,7 +186,7 @@ func (s *Store) rotate(ctx context.Context, old, next []byte, now, exp time.Time
 	return owner, version, revoked, nil
 }
 
-// revoke apaga a família do token e mata os access do dono (logout); devolve o dono. Token desconhecido: "".
+// revoke: token desconhecido devolve "".
 func (s *Store) revoke(ctx context.Context, hash []byte) (string, error) {
 	var owner string
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -215,7 +212,7 @@ func (s *Store) revoke(ctx context.Context, hash []byte) (string, error) {
 	return owner, nil
 }
 
-// cleanup apaga os refresh vencidos (usados ficam até vencer: é com eles que o reuso é detectado).
+// cleanup: os usados ficam até vencer, porque é com eles que o reuso é detectado.
 func (s *Store) cleanup(ctx context.Context, now time.Time) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM refresh_tokens WHERE expires_at < $1`, now)
 	return err

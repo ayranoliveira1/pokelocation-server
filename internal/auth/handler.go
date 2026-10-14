@@ -1,5 +1,4 @@
-// Package auth: cadastro e login (email+senha, Google), tokens e o middleware que autentica as rotas 🔒.
-// Contrato em docs/api.md §2.
+// Package auth: contas (email+senha, Google), tokens e o middleware das rotas autenticadas. Contrato: docs/api.md §2.
 package auth
 
 import (
@@ -25,21 +24,18 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/ratelimit"
 )
 
-// Config vem das variáveis de ambiente (main).
 type Config struct {
-	SigningKey         string // AUTH_SIGNING_KEY: seed Ed25519 de 32 bytes em base64 padrão
-	GoogleClientID     string // GOOGLE_CLIENT_ID (vazio = login Google desligado)
-	GoogleClientSecret string // GOOGLE_CLIENT_SECRET
-	PublicURL          string // PUBLIC_URL: https://<host> visto pelo navegador (redirect_uri do Google)
+	SigningKey         string // seed Ed25519 de 32 bytes em base64 padrão
+	GoogleClientID     string // vazio = login Google desligado
+	GoogleClientSecret string
+	PublicURL          string // https://<host> como o navegador vê: base do redirect_uri do Google
 }
 
 const maxBody = 4 << 10
 
-// Handler: rotas HTTP do auth.
 type Handler struct {
-	// OnRevoke: chamado depois do commit do logout, do reuso de refresh e do vínculo Google (o main liga em hub.Kick).
-	OnRevoke func(user string)
-	// OnFriendsChange: amizade desfeita pelo vínculo Google (o main liga em hub.ReloadFriends dos dois).
+	// Chamados depois do commit, para o WebSocket derrubar o revogado e recarregar as listas de amigos.
+	OnRevoke        func(user string)
 	OnFriendsChange func(a, b string)
 
 	svc       *Service
@@ -79,7 +75,6 @@ func (h *Handler) notify(user string, exFriends []string) {
 	}
 }
 
-// Routes registra as rotas; authed protege as 🔒 (no main, o próprio h.Authed).
 func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
 	mux.HandleFunc("POST /v1/auth/register", h.register)
 	mux.HandleFunc("POST /v1/auth/login", h.login)
@@ -91,16 +86,16 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	mux.Handle("GET /v1/me", authed(h.me))
 }
 
-// Cleanup apaga refresh tokens vencidos. Para a limpeza diária (main).
+// Cleanup apaga os refresh tokens vencidos.
 func (h *Handler) Cleanup(ctx context.Context) error { return h.svc.store.cleanup(ctx, h.svc.now()) }
 
-// Verify valida um access token (para o Auth do WebSocket, S6): devolve o dono e o vencimento. Token inválido,
-// vencido ou revogado (logout, reuso de refresh, vínculo Google) → ErrUnauthorized; outro erro = banco fora.
+// Verify devolve o dono e o vencimento do access token. Inválido, vencido ou revogado → ErrUnauthorized; outro erro =
+// banco fora.
 func (h *Handler) Verify(ctx context.Context, token string) (userID string, exp time.Time, err error) {
 	return h.svc.verify(ctx, token)
 }
 
-// Authed exige "Authorization: Bearer <access>" válido e põe o id do usuário no contexto (httpx.User).
+// Authed exige um Bearer válido e põe o id do usuário no contexto (httpx.User).
 func (h *Handler) Authed(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
@@ -169,7 +164,7 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	id := httpx.User(r.Context())
 	email, code, err := h.svc.store.me(r.Context(), id)
 	if errors.Is(err, errNotFound) {
-		err = errUnauthorized // conta apagada com access ainda válido
+		err = errUnauthorized // conta apagada com access ainda dentro do prazo
 	}
 	if err != nil {
 		h.fail(w, err)
@@ -182,7 +177,7 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	}{id, email, code})
 }
 
-// googleStart/callback são navegação do navegador: erro sem volta ao app é texto puro (api.md §2).
+// googleStart/googleCallback respondem a um navegador: erro sem como voltar ao app é texto puro.
 func (h *Handler) googleStart(w http.ResponseWriter, r *http.Request) {
 	if h.svc.cfg.GoogleClientID == "" {
 		http.Error(w, "google desligado", http.StatusServiceUnavailable)
@@ -244,7 +239,7 @@ func (h *Handler) googleExchange(w http.ResponseWriter, r *http.Request) {
 	h.reply(w, http.StatusOK, t, err)
 }
 
-// one: o valor do parâmetro só se vier exatamente uma vez.
+// one: parâmetro repetido conta como ausente (sem ambiguidade sobre qual valor vale).
 func one(q url.Values, k string) string {
 	if v := q[k]; len(v) == 1 {
 		return v[0]
@@ -252,7 +247,7 @@ func one(q url.Values, k string) string {
 	return ""
 }
 
-// redirect 302 sem corpo; a URL leva state/código: sem cache nem Referer.
+// redirect: a URL leva state e código de uso único, então nada de cache nem Referer.
 func redirect(w http.ResponseWriter, to string) {
 	w.Header().Set("Location", to)
 	w.Header().Set("Cache-Control", "no-store")
@@ -268,8 +263,6 @@ func (h *Handler) reply(w http.ResponseWriter, status int, t tokens, err error) 
 	httpx.JSON(w, status, t)
 }
 
-// fail: erro esperado → código do api.md; argon2 lotado → 503 com o log certo; cliente que desistiu → 503 sem log; o
-// resto vai para httpx.DBError (500 se o Postgres respondeu, senão 503).
 func (h *Handler) fail(w http.ResponseWriter, err error) {
 	var ae *apiError
 	switch {
@@ -285,8 +278,8 @@ func (h *Handler) fail(w http.ResponseWriter, err error) {
 	}
 }
 
-// logErr para o fluxo Google (que responde por redirect): erro do Google é nosso texto ou da lib (sem dado do
-// usuário) e vai inteiro; erro de banco/Redis só com SQLSTATE ou tipo, como o httpx.DBError.
+// logErr: erro do lado Google (texto nosso ou da lib) vai inteiro; erro de banco/Redis só com SQLSTATE ou tipo, porque
+// a mensagem do Postgres pode ecoar entrada do usuário.
 func logErr(op string, err error) {
 	var g googleError
 	var pg *pgconn.PgError
@@ -300,7 +293,7 @@ func logErr(op string, err error) {
 	}
 }
 
-// allow: 5/min por IP e por email (email "" = só IP). Recusado → responde 429 e devolve false.
+// allow: 5/min por IP e por email. Recusado → já respondeu 429.
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, email string) bool {
 	e, _ := normEmail(email)
 	now := h.svc.now()
@@ -311,9 +304,8 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, email string) bo
 	return false
 }
 
-// clientIP: o X-Forwarded-For que o Caddy põe (api.md §1: ele descarta o de fora; o RemoteAddr é o Caddy). Último
-// valor, por garantia. Sem XFF válido (só sem Caddy: testes) cai no RemoteAddr. IPv6 vira o /64 (um cliente costuma
-// ter o /64 inteiro).
+// clientIP: o X-Forwarded-For é confiável porque o binário só é alcançável pelo Caddy, que descarta o de fora (o
+// RemoteAddr é o próprio Caddy). IPv6 conta por /64: um cliente costuma ter o /64 inteiro.
 func clientIP(r *http.Request) string {
 	var a netip.Addr
 	if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {

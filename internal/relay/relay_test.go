@@ -27,7 +27,7 @@ type env struct {
 	hub  *Hub
 	srv  *httptest.Server
 	pool *pgxpool.Pool
-	exp  sync.Map // token → vencimento diferente de 1 h
+	exp  sync.Map // token → vencimento, quando não é 1 h
 	locs chan string
 }
 
@@ -59,7 +59,7 @@ func newEnvPool(t *testing.T, pool *pgxpool.Pool) *env {
 	})
 	e.hub.authWait = 300 * time.Millisecond
 	mux := http.NewServeMux()
-	e.hub.Routes(mux, func(h http.HandlerFunc) http.Handler { // no lugar do auth.Authed: X-User é o usuário
+	e.hub.Routes(mux, func(h http.HandlerFunc) http.Handler { // X-User no lugar do Bearer
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			h(w, r.WithContext(httpx.WithUser(r.Context(), r.Header.Get("X-User"))))
 		})
@@ -107,7 +107,6 @@ func (e *env) dialRaw(h http.Header) (*websocket.Conn, *http.Response, error) {
 	return websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(e.srv.URL, "http")+"/v1/ws", h)
 }
 
-// connect abre e autentica; não espera nada de volta (o servidor não responde ao Auth).
 func (e *env) connect(token string) *client {
 	e.t.Helper()
 	ws, _, err := e.dialRaw(nil)
@@ -120,8 +119,7 @@ func (e *env) connect(token string) *client {
 	return c
 }
 
-// online: conecta e espera o Auth terminar (registro, amigos, corte do backlog). O servidor não responde ao Auth;
-// um frame inválido só é respondido (bad_frame) depois dele.
+// online espera o Auth terminar: o servidor não responde ao Auth, mas só responde a um frame inválido depois dele.
 func (e *env) online(user string) *client {
 	e.t.Helper()
 	c := e.connect(user)
@@ -166,7 +164,6 @@ func (c *client) read() wire.Frame {
 	return f
 }
 
-// quiet: nada chega em d.
 func (c *client) quiet(d time.Duration) {
 	c.t.Helper()
 	_ = c.ws.SetReadDeadline(time.Now().Add(d))
@@ -201,8 +198,6 @@ func (c *client) wantClose(code int) {
 func envelope(to, id, payload string) []byte {
 	return wire.AppendEnvelope(nil, []byte(to), []byte(id), []byte(payload))
 }
-
-// ---- conexão e Auth ----
 
 func TestAuth(t *testing.T) {
 	e := newEnv(t)
@@ -269,12 +264,10 @@ func TestMaxConnections(t *testing.T) {
 		e.connect(a)
 		e.waitOnline(a, i)
 	}
-	e.connect(a) // a 5ª derruba a mais antiga
+	e.connect(a)
 	first.wantClose(websocket.ClosePolicyViolation)
 	e.waitOnline(a, 4)
 }
-
-// ---- envelopes ----
 
 func TestEnvelopeLive(t *testing.T) {
 	e := newEnv(t)
@@ -286,7 +279,7 @@ func TestEnvelopeLive(t *testing.T) {
 	if f := ca.read(); f.Type != wire.Ack || string(f.Peer) != b || string(f.MsgID) != "m1" {
 		t.Fatalf("Ack ao remetente: %+v", f)
 	}
-	for _, cb := range []*client{cb1, cb2} { // todas as conexões do destinatário
+	for _, cb := range []*client{cb1, cb2} {
 		if f := cb.read(); f.Type != wire.Envelope || string(f.Peer) != a || string(f.MsgID) != "m1" ||
 			string(f.Payload) != "cifrado" {
 			t.Fatalf("Envelope ao destinatário: %+v", f)
@@ -296,7 +289,7 @@ func TestEnvelopeLive(t *testing.T) {
 		t.Fatalf("gravados: %d", n)
 	}
 
-	ca.send(envelope(b, "m1", "cifrado")) // reenvio: Ack de novo, sem duplicar nem reentregar
+	ca.send(envelope(b, "m1", "cifrado")) // reenvio
 	if f := ca.read(); f.Type != wire.Ack || string(f.MsgID) != "m1" {
 		t.Fatalf("Ack do reenvio: %+v", f)
 	}
@@ -305,7 +298,7 @@ func TestEnvelopeLive(t *testing.T) {
 		t.Fatalf("reenvio duplicou: %d", n)
 	}
 
-	cb2.send(wire.AppendAck(nil, []byte(a), []byte("m1"))) // o Ack de qualquer conexão apaga
+	cb2.send(wire.AppendAck(nil, []byte(a), []byte("m1")))
 	for deadline := time.Now().Add(5 * time.Second); e.count(`SELECT count(*) FROM envelopes`) != 0; {
 		if time.Now().After(deadline) {
 			t.Fatal("Ack não apagou")
@@ -326,13 +319,13 @@ func TestEnvelopeRules(t *testing.T) {
 	ca.wantError("too_large")
 	ca.send([]byte{wire.Envelope, 0, 1})
 	ca.wantError("bad_frame")
-	ca.send(envelope(b, "m\x00", "x")) // o Postgres não guarda NUL em text
+	ca.send(envelope(b, "m\x00", "x")) // o Postgres não guarda NUL nem UTF-8 inválido em text
 	ca.wantError("bad_frame")
-	ca.send(envelope(b, "\xff\xfe", "x")) // nem UTF-8 inválido
+	ca.send(envelope(b, "\xff\xfe", "x"))
 	ca.wantError("bad_frame")
-	// tipos que só o servidor manda (wire.Decode não sabe de direção)
+	// o wire.Decode não sabe de direção
 	for _, f := range [][]byte{
-		wire.AppendAuth(nil, []byte(a)), // Auth de novo
+		wire.AppendAuth(nil, []byte(a)),
 		wire.AppendLocationUpdate(nil, []byte(b), []byte("p")),
 		wire.AppendLocationOff(nil, []byte(b)),
 		wire.AppendError(nil, "x"),
@@ -341,7 +334,6 @@ func TestEnvelopeRules(t *testing.T) {
 		ca.wantError("bad_frame")
 	}
 
-	// a conexão segue viva
 	ca.send(envelope(b, "ok", "x"))
 	if f := ca.read(); f.Type != wire.Ack {
 		t.Fatalf("depois dos erros: %+v", f)
@@ -350,7 +342,6 @@ func TestEnvelopeRules(t *testing.T) {
 		t.Fatalf("gravados: %d", n)
 	}
 
-	// o Ack de quem não é o destinatário não apaga
 	cs := e.online(stranger)
 	cs.send(wire.AppendAck(nil, []byte(a), []byte("ok")))
 	cs.quiet(200 * time.Millisecond)
@@ -371,10 +362,9 @@ func TestReloadFriends(t *testing.T) {
 	if f := ca.read(); f.Type != wire.Ack {
 		t.Fatalf("depois do ReloadFriends: %+v", f)
 	}
-	e.hub.ReloadFriends(b) // offline aqui: nada
+	e.hub.ReloadFriends(b) // offline aqui
 }
 
-// Fila pendente: entregue depois do Auth, mais antigos primeiro, com contrapressão (nunca fecha por backlog).
 func TestBacklog(t *testing.T) {
 	e := newEnv(t)
 	a, b := e.user(), e.user()
@@ -393,7 +383,6 @@ func TestBacklog(t *testing.T) {
 	}
 }
 
-// Fila ao vivo cheia de envelopes: fecha a conexão (os envelopes seguem no Postgres).
 func TestSlowConsumerClosed(t *testing.T) {
 	e := newEnv(t)
 	a, b := e.user(), e.user()
@@ -414,8 +403,6 @@ func TestSlowConsumerClosed(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
-
-// ---- localização (fronteira com o S7) ----
 
 func TestLocationHooks(t *testing.T) {
 	e := newEnv(t)
@@ -439,8 +426,6 @@ func TestLocationHooks(t *testing.T) {
 	cs.quiet(200 * time.Millisecond)
 	ca.quiet(50 * time.Millisecond)
 }
-
-// ---- REST ----
 
 func (e *env) rest(method, path, user, body string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -494,7 +479,7 @@ func TestRESTQueue(t *testing.T) {
 	other := e.rest("GET", "/v1/envelopes", c, "")
 	var oq queued
 	_ = json.Unmarshal(other.Body.Bytes(), &oq)
-	ids = append(ids, oq.Envelopes[0].ID, "999999999") // alheio e inexistente: ignorados
+	ids = append(ids, oq.Envelopes[0].ID, "999999999") // alheio e inexistente
 	body, _ := json.Marshal(map[string][]string{"ids": ids})
 	if w := e.rest("POST", "/v1/envelopes/ack", b, string(body)); w.Code != 204 {
 		t.Fatalf("ack: %d %s", w.Code, w.Body.String())
@@ -520,7 +505,6 @@ func TestRESTQueue(t *testing.T) {
 	}
 }
 
-// Página limitada a ~48 KiB de JSON (resposta ≤ 64 KiB, limite do app).
 func TestRESTQueueSize(t *testing.T) {
 	e := newEnv(t)
 	a, b := e.user(), e.user()
@@ -552,7 +536,6 @@ func TestCleanup(t *testing.T) {
 	}
 }
 
-// Revogação (logout, reuso de refresh, vínculo Google): todas as conexões do usuário caem com unauthorized + 1008.
 func TestKick(t *testing.T) {
 	e := newEnv(t)
 	a, b := e.user(), e.user()
@@ -567,10 +550,9 @@ func TestKick(t *testing.T) {
 	}
 	e.waitOnline(a, 0)
 	cb.quiet(100 * time.Millisecond)
-	e.hub.Kick(a) // ninguém online: nada
+	e.hub.Kick(a) // ninguém online
 }
 
-// O buffer de leitura é reaproveitado a cada mensagem: nada que vai para outra conexão pode fatiá-lo.
 func TestNoReadBufferAliasing(t *testing.T) {
 	e := newEnv(t)
 	a, b := e.user(), e.user()
@@ -583,8 +565,7 @@ func TestNoReadBufferAliasing(t *testing.T) {
 				envelope(b, fmt.Sprintf("m%03d", i), strings.Repeat(string(rune('a'+i%26)), 100+i)))
 		}
 	}()
-	// o mesmo envelope pode chegar ao vivo e pelo backlog (o app deduplica por from+msg id): confere o conteúdo de
-	// cada um pelo seu msg id
+	// o mesmo envelope pode chegar ao vivo e pelo backlog (o app deduplica): confere o conteúdo pelo msg id
 	for _, cb := range []*client{cb1, cb2} {
 		seen := map[string]bool{}
 		for len(seen) < n {
@@ -606,8 +587,7 @@ func TestNoReadBufferAliasing(t *testing.T) {
 	}
 }
 
-// Amizade desfeita enquanto a 2ª conexão do usuário se autentica (o :overlay reconectando enquanto ele bloqueia pelo
-// principal): a lista em memória não pode voltar a ser a velha.
+// Amizade desfeita enquanto a 2ª conexão do usuário se autentica: a lista em memória não pode voltar a ser a velha.
 func TestFriendsChangeDuringAuth(t *testing.T) {
 	e := newEnv(t)
 	a, b := e.user(), e.user()
@@ -618,7 +598,7 @@ func TestFriendsChangeDuringAuth(t *testing.T) {
 		if _, err := e.pool.Exec(context.Background(), `DELETE FROM friendships`); err != nil {
 			t.Error(err)
 		}
-		e.hub.ReloadFriends(a) // o OnChange do friends, depois do commit
+		e.hub.ReloadFriends(a)
 		e.hub.ReloadFriends(b)
 	}
 	ca2 := e.connect(a)
@@ -631,8 +611,8 @@ func TestFriendsChangeDuringAuth(t *testing.T) {
 	ca2.wantError("forbidden")
 }
 
-// Fan-out com um destinatário lento: os outros liberam o buffer compartilhado antes; os bytes que o lento recebe
-// depois têm de ser os enviados, na ordem (nada de buffer devolvido ao pool cedo e reaproveitado).
+// Fan-out com um destinatário lento: os rápidos liberam o buffer compartilhado antes; se ele voltasse ao pool cedo, o
+// lento receberia bytes de outro frame.
 func TestFanOutSlowRecipient(t *testing.T) {
 	e := newEnv(t)
 	a, slow, f1, f2 := e.user(), e.user(), e.user(), e.user()
@@ -645,12 +625,12 @@ func TestFanOutSlowRecipient(t *testing.T) {
 	payload := func(i int) string { return fmt.Sprintf("pos-%02d-%s", i, strings.Repeat("z", i*7)) }
 	for i := range n {
 		e.hub.SendFriends(a, wire.AppendLocationUpdate(Buf(), []byte(a), []byte(payload(i))))
-		// o pool recicla na hora o que os rápidos liberam; frames de outro tamanho reaproveitam esses buffers
+		// força o reaproveitamento do que os rápidos liberam
 		ob := getOut()
 		ob.b = append(ob.b, strings.Repeat("!", 300)...)
 		ob.release()
 	}
-	for _, c := range []*client{c1, c2, cs} { // o lento por último
+	for _, c := range []*client{c1, c2, cs} {
 		for i := range n {
 			if f := c.read(); f.Type != wire.LocationUpdate || string(f.Payload) != payload(i) {
 				t.Fatalf("frame %d: %d %q", i, f.Type, f.Payload)
