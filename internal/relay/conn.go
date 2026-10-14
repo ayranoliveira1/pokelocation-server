@@ -159,8 +159,9 @@ func (c *Conn) setUser(id string) {
 	c.userB = []byte(id)
 }
 
+// friend: pode receber Envelope 1:1 (amigo ou membro de grupo em comum, sem bloqueio).
 func (c *Conn) friend(peer []byte) bool {
-	fs := c.u.friends.Load()
+	fs := c.u.contacts.Load()
 	if fs == nil {
 		return false
 	}
@@ -456,7 +457,11 @@ func (c *Conn) backlog(upTo int64) {
 		}
 		for _, e := range page {
 			ob := getOut()
-			ob.b = wire.AppendEnvelope(ob.b, []byte(e.From), []byte(e.ClientMsgID), e.Payload)
+			if e.GroupID != nil {
+				ob.b = wire.AppendGroupEnvelope(ob.b, []byte(*e.GroupID), []byte(e.ClientMsgID), e.Payload, []byte(e.From))
+			} else {
+				ob.b = wire.AppendEnvelope(ob.b, []byte(e.From), []byte(e.ClientMsgID), e.Payload)
+			}
 			if !c.pushWait(ob) {
 				return
 			}
@@ -494,6 +499,8 @@ func (c *Conn) handle(msg []byte) {
 		c.envelope(f)
 	case f.Type == wire.Ack:
 		c.ack(f)
+	case f.Type == wire.GroupEnvelope && f.Peer == nil:
+		c.groupEnvelope(f)
 	case f.Type == wire.Location || f.Type == wire.LocationOff && f.Peer == nil:
 		c.hub.onLocation(c, f)
 	default: // o wire.Decode não sabe de direção: tipos só do servidor e Auth repetido
@@ -510,6 +517,10 @@ func (c *Conn) envelope(f wire.Frame) {
 		c.sendError("forbidden")
 		return
 	}
+	if !c.hub.chat.Allow(c.user, time.Now()) {
+		c.sendError("rate_limited")
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.hub.dbWait)
 	fresh, err := c.hub.store.insert(ctx, string(f.Peer), c.user, string(f.MsgID), f.Payload)
 	cancel()
@@ -520,6 +531,30 @@ func (c *Conn) envelope(f wire.Frame) {
 		return
 	}
 	c.hub.relayEnvelope(c, f, fresh)
+}
+
+func (c *Conn) groupEnvelope(f wire.Frame) {
+	if !validMsgID(f.MsgID) {
+		c.sendError("bad_frame")
+		return
+	}
+	if !c.hub.chat.Allow(c.user, time.Now()) {
+		c.sendError("rate_limited")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), c.hub.dbWait)
+	member, recipients, err := c.hub.store.groupSend(ctx, string(f.Group), c.user, string(f.MsgID), f.Payload)
+	cancel()
+	if err != nil {
+		logDB("relay: grupo", err)
+		c.kill(websocket.CloseInternalServerErr, "")
+		return
+	}
+	if !member {
+		c.sendError("forbidden") // não-membro e grupo inexistente dão o mesmo erro
+		return
+	}
+	c.hub.relayGroup(c, f, recipients)
 }
 
 func (c *Conn) ack(f wire.Frame) {

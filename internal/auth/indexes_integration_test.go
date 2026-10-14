@@ -45,6 +45,7 @@ func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 		{qDelFamily, []any{s.Family}, [][]string{{"refresh_tokens_family"}}},
 		{qMarkUsed, []any{s.TokenHash, now}, [][]string{{"refresh_tokens_token_hash_key"}}},
 		{qRevokeLookup, []any{s.TokenHash}, [][]string{{"refresh_tokens_token_hash_key"}}},
+		{qClearFCMOfUser, []any{s.User}, [][]string{{"devices_pkey"}}},
 	} {
 		for _, group := range c.indexes {
 			testdb.RequireIndex(t, pool, c.sql, c.args, group...)

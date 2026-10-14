@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -821,5 +822,102 @@ func TestCleanupBatches(t *testing.T) {
 	var n int
 	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("sobraram %d (%v)", n, err)
+	}
+}
+
+// Logout e reuso de refresh apagam o token FCM: o aparelho não recebe ping da conta que saiu.
+func TestRevocationClearsFCM(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := context.Background()
+	withDevice := func(email string) (tokenResp, string) {
+		r := e.register(email)
+		id := e.me(r.Access).ID
+		if _, err := e.pool.Exec(ctx, `INSERT INTO devices (user_id, registration_id, identity_key, signed_prekey_id,
+			signed_prekey, signed_prekey_sig, kyber_last_resort_id, kyber_last_resort, kyber_last_resort_sig, fcm_token)
+			VALUES ($1, 1, '\x05', 1, '\x05', '\x00', 1, '\x08', '\x00', $2)`, id, "tok-"+id); err != nil {
+			t.Fatal(err)
+		}
+		return r, id
+	}
+	fcm := func(id string) *string {
+		var tok *string
+		if err := e.pool.QueryRow(ctx, `SELECT fcm_token FROM devices WHERE user_id = $1`, id).Scan(&tok); err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	r, id := withDevice("fcm1@ex.com")
+	b, _ := json.Marshal(map[string]string{"refresh_token": r.Refresh})
+	e.post("/v1/auth/logout", string(b))
+	if fcm(id) != nil {
+		t.Fatal("logout não apagou o token FCM")
+	}
+	r, id = withDevice("fcm2@ex.com")
+	e.refreshCode(r.Refresh)
+	e.refreshCode(r.Refresh) // reuso
+	if fcm(id) != nil {
+		t.Fatal("reuso não apagou o token FCM")
+	}
+	_, other := withDevice("fcm3@ex.com")
+	if fcm(other) == nil {
+		t.Fatal("apagou o token de outra conta")
+	}
+}
+
+// Vínculo Google tira a conta de todos os grupos (o invasor não fica nos grupos do dono real nem o contrário).
+func TestLinkLeavesGroups(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.h.svc.google = fakeGoogle
+	ctx := context.Background()
+	id := e.me(e.register("grp@ex.com").Access).ID
+	f1, other := e.me(e.register("grp1@ex.com").Access).ID, e.me(e.register("grp2@ex.com").Access).ID
+	group := func(owner string, members ...string) string {
+		var g string
+		if err := e.pool.QueryRow(ctx, `INSERT INTO groups (owner_id) VALUES ($1) RETURNING id`, owner).Scan(&g); err != nil {
+			t.Fatal(err)
+		}
+		for i, m := range append([]string{owner}, members...) {
+			if _, err := e.pool.Exec(ctx, `INSERT INTO group_members (group_id, user_id, joined_at)
+				VALUES ($1, $2, now() + make_interval(secs => $3))`, g, m, i); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return g
+	}
+	owned, joined, alone := group(id, f1), group(other, id), group(id)
+
+	var mu sync.Mutex
+	got := map[string][]string{}
+	e.h.OnGroupsChange = func(g string, users []string) {
+		mu.Lock()
+		got[g] = slices.Sorted(slices.Values(users))
+		mu.Unlock()
+	}
+	if _, err := e.h.svc.googleUser(ctx, "sub-grp", "grp@ex.com"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM group_members WHERE user_id = $1`, id).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("ainda em %d grupos (%v)", n, err)
+	}
+	var owner string
+	if err := e.pool.QueryRow(ctx, `SELECT owner_id FROM groups WHERE id = $1`, owned).Scan(&owner); err != nil || owner != f1 {
+		t.Fatalf("dono do grupo que era dele: %q (%v)", owner, err)
+	}
+	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM groups WHERE id = $1`, alone).Scan(&n); err != nil || n != 0 {
+		t.Fatal("grupo só dele não sumiu")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := slices.Sorted(slices.Values([]string{f1, id})); fmt.Sprint(got[owned]) != fmt.Sprint(want) {
+		t.Errorf("aviso de %s: %v", owned, got[owned])
+	}
+	if want := slices.Sorted(slices.Values([]string{other, id})); fmt.Sprint(got[joined]) != fmt.Sprint(want) {
+		t.Errorf("aviso de %s: %v", joined, got[joined])
+	}
+	if fmt.Sprint(got[alone]) != fmt.Sprint([]string{id}) {
+		t.Errorf("aviso de %s: %v", alone, got[alone])
 	}
 }

@@ -21,6 +21,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/argon2"
 	"google.golang.org/api/idtoken"
+
+	"github.com/ayranoliveira1/pokelocation-server/internal/groups"
 )
 
 const (
@@ -80,7 +82,7 @@ type Service struct {
 	cfg    Config
 	dummy  string        // login sem conta compara com este hash: o tempo de resposta não revela se o email existe
 	argon  chan struct{} // 19 MiB por hash: o teto de hashes simultâneos impede uma rajada de logins de estourar a RAM
-	notify func(user string, exFriends []string)
+	notify func(user string, exFriends []string, groupChanges []groups.Change)
 	// google é campo para o teste trocar a ida ao Google.
 	google func(ctx context.Context, code string) (sub, email string, err error)
 }
@@ -139,7 +141,7 @@ func (s *Service) refresh(ctx context.Context, token string) (tokens, error) {
 		return tokens{}, err
 	}
 	if revoked != "" {
-		s.notify(revoked, nil)
+		s.notify(revoked, nil, nil)
 	}
 	if id == "" {
 		return tokens{}, errUnauthorized
@@ -150,7 +152,7 @@ func (s *Service) refresh(ctx context.Context, token string) (tokens, error) {
 func (s *Service) logout(ctx context.Context, token string) error {
 	user, err := s.store.revoke(ctx, sha(token))
 	if user != "" {
-		s.notify(user, nil)
+		s.notify(user, nil, nil)
 	}
 	return err
 }
@@ -325,12 +327,12 @@ func (s *Service) googleUser(ctx context.Context, sub, email string) (string, er
 	if linked != nil {
 		return "", googleError{errors.New("email já vinculado a outra conta Google")}
 	}
-	ok, ex, err := s.store.linkGoogle(ctx, id, sub)
+	ok, ex, changes, err := s.store.linkGoogle(ctx, id, sub)
 	if err == nil && !ok {
 		err = googleError{errors.New("vínculo concorrente")}
 	}
 	if ok {
-		s.notify(id, ex)
+		s.notify(id, ex, changes)
 	}
 	return id, err
 }

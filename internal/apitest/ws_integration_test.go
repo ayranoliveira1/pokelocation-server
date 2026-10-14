@@ -2,6 +2,7 @@ package apitest
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -493,21 +494,18 @@ func TestWSKick(t *testing.T) {
 	})
 }
 
-// ponytail: manda pelo WS; quando o chat ganhar limite de mensagens por minuto, semear por SQL na tabela envelopes.
+// A fila é semeada no banco: pelo WS, o limite de 60 mensagens por minuto barraria um backlog maior que a fila ao vivo.
 func TestWSBacklog(t *testing.T) {
 	s := start(t)
 	s.need("GET", "/v1/ws")
 	a, b := s.register("a"), s.register("b")
 	befriend(s, a, b)
-	wa := s.ws(a.access)
-	wa.ready()
 	const total = 150
 	p := s.payload(16 << 10) // 150 × 16 KiB ≈ 2,4 MB: mais que os buffers de TCP do loopback
-	for i := range total {
-		wa.envelope(b, fmt.Sprintf("m%03d", i), p)
-	}
-	for range total {
-		wa.expect(wire.Ack, 10*time.Second) // Ack S→C = gravado
+	if _, err := s.pool.Exec(context.Background(), `INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload)
+		SELECT $1, $2, 'm' || lpad(i::text, 3, '0'), $3 FROM generate_series(0, $4 - 1) i ORDER BY i`,
+		b.id, a.id, p, total); err != nil {
+		t.Fatal("seed:", err)
 	}
 
 	wb := s.wsBuf(b.access, 0) // lento: o leitor só avança quando o teste consome

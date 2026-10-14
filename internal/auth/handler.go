@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/ayranoliveira1/pokelocation-server/internal/groups"
 	"github.com/ayranoliveira1/pokelocation-server/internal/httpx"
 	"github.com/ayranoliveira1/pokelocation-server/internal/ratelimit"
 )
@@ -41,6 +42,7 @@ type Handler struct {
 	// Chamados depois do commit, para o WebSocket derrubar o revogado e recarregar as listas de amigos.
 	OnRevoke        func(user string)
 	OnFriendsChange func(a, b string)
+	OnGroupsChange  func(groupID string, users []string)
 
 	svc       *Service
 	ip, email *ratelimit.Limiter
@@ -69,13 +71,18 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 	return h, nil
 }
 
-func (h *Handler) notify(user string, exFriends []string) {
+func (h *Handler) notify(user string, exFriends []string, groupChanges []groups.Change) {
 	if h.OnRevoke != nil {
 		h.OnRevoke(user)
 	}
 	if h.OnFriendsChange != nil {
 		for _, f := range exFriends {
 			h.OnFriendsChange(user, f)
+		}
+	}
+	if h.OnGroupsChange != nil {
+		for _, c := range groupChanges {
+			h.OnGroupsChange(c.Group, c.Users)
 		}
 	}
 }

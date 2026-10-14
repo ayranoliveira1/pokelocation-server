@@ -19,6 +19,7 @@ import (
 
 	"github.com/ayranoliveira1/pokelocation-server/internal/auth"
 	"github.com/ayranoliveira1/pokelocation-server/internal/httpx"
+	"github.com/ayranoliveira1/pokelocation-server/internal/ratelimit"
 	"github.com/ayranoliveira1/pokelocation-server/internal/testdb"
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
@@ -59,6 +60,7 @@ func newEnvPool(t *testing.T, pool *pgxpool.Pool) *env {
 		e.locs <- fmt.Sprintf("%s %d %s", c.User(), f.Type, f.Payload)
 	})
 	e.hub.authWait = 300 * time.Millisecond
+	e.hub.chat = ratelimit.New(1 << 20) // rajadas dos testes; TestChatRateLimit põe o limite de verdade
 	mux := http.NewServeMux()
 	e.hub.Routes(mux, func(h http.HandlerFunc) http.Handler { // X-User no lugar do Bearer
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -678,7 +680,7 @@ func TestFriendsLimit(t *testing.T) {
 		a, maxFriendsRead+5); err != nil {
 		t.Fatal(err)
 	}
-	ids, err := e.hub.store.friends(context.Background(), a)
+	ids, _, err := e.hub.store.circle(context.Background(), a)
 	if err != nil || len(ids) != maxFriendsRead {
 		t.Fatalf("%d amigos, %v", len(ids), err)
 	}
@@ -776,4 +778,180 @@ func TestIdleConnGoroutines(t *testing.T) {
 		}
 	}
 	t.Fatalf("%d leitores, %d escritores e %d backlogs para %d conexões ociosas", r, w, b, n)
+}
+
+// ---- grupos (§7), contatos, limite de chat e push ----
+
+func (e *env) group(members ...string) string {
+	e.t.Helper()
+	ctx := context.Background()
+	var g string
+	if err := e.pool.QueryRow(ctx, `INSERT INTO groups (owner_id) VALUES ($1) RETURNING id`, members[0]).Scan(&g); err != nil {
+		e.t.Fatal(err)
+	}
+	for _, m := range members {
+		if _, err := e.pool.Exec(ctx, `INSERT INTO group_members (group_id, user_id) VALUES ($1, $2)`, g, m); err != nil {
+			e.t.Fatal(err)
+		}
+	}
+	return g
+}
+
+func (e *env) block(a, b string) {
+	e.t.Helper()
+	if _, err := e.pool.Exec(context.Background(), `INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2)`, a, b); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+func groupEnv(g, id, payload string) []byte {
+	return wire.AppendGroupEnvelope(nil, []byte(g), []byte(id), []byte(payload), nil)
+}
+
+func TestGroupEnvelope(t *testing.T) {
+	e := newEnv(t)
+	var mu sync.Mutex
+	var pinged []string
+	e.hub.Notify = func(u string) { mu.Lock(); pinged = append(pinged, u); mu.Unlock() }
+	a, b, blocked, off, outsider := e.user(), e.user(), e.user(), e.user(), e.user()
+	g := e.group(a, b, blocked, off)
+	e.block(blocked, a)
+	ca, cb, cbl, co := e.online(a), e.online(b), e.online(blocked), e.online(outsider)
+
+	ca.send(groupEnv(g, "m1", "cifrado"))
+	if f := ca.read(); f.Type != wire.Ack || string(f.Peer) != g || string(f.MsgID) != "m1" {
+		t.Fatalf("Ack ao remetente: %+v", f)
+	}
+	if f := cb.read(); f.Type != wire.GroupEnvelope || string(f.Group) != g || string(f.MsgID) != "m1" ||
+		string(f.Payload) != "cifrado" || string(f.Peer) != a {
+		t.Fatalf("GroupEnvelope ao membro: %+v", f)
+	}
+	cbl.quiet(200 * time.Millisecond) // bloqueio em qualquer sentido: sem cópia
+	if n := e.count(`SELECT count(*) FROM envelopes WHERE group_id = $1`, g); n != 2 {
+		t.Fatalf("cópias: %d", n)
+	}
+	if n := e.count(`SELECT count(*) FROM envelopes WHERE recipient_id = $1 AND sender_id = $2 AND group_id = $3`, off, a, g); n != 1 {
+		t.Fatal("sem cópia para o membro offline")
+	}
+	mu.Lock()
+	if fmt.Sprint(pinged) != fmt.Sprint([]string{off}) {
+		t.Errorf("push: %v", pinged)
+	}
+	mu.Unlock()
+
+	ca.send(groupEnv(g, "m1", "cifrado")) // reenvio
+	if f := ca.read(); f.Type != wire.Ack || string(f.MsgID) != "m1" {
+		t.Fatalf("Ack do reenvio: %+v", f)
+	}
+	cb.quiet(200 * time.Millisecond)
+	if n := e.count(`SELECT count(*) FROM envelopes WHERE group_id = $1`, g); n != 2 {
+		t.Fatalf("reenvio duplicou: %d", n)
+	}
+
+	co.send(groupEnv(g, "x", "p")) // não-membro: forbidden, sem revelar
+	co.wantError("forbidden")
+	co.send(groupEnv("00000000-0000-0000-0000-000000000099", "x", "p"))
+	co.wantError("forbidden")
+	ca.send(wire.AppendGroupEnvelope(nil, []byte(g), []byte("m2"), []byte("p"), []byte(b))) // from é do servidor
+	ca.wantError("bad_frame")
+
+	cb.send(wire.AppendAck(nil, []byte(a), []byte("m1"))) // o Ack de sempre apaga a cópia
+	for deadline := time.Now().Add(5 * time.Second); e.count(`SELECT count(*) FROM envelopes WHERE recipient_id = $1`, b) != 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("Ack não apagou a cópia")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// backlog e REST levam o group_id
+	cOff := e.online(off)
+	if f := cOff.read(); f.Type != wire.GroupEnvelope || string(f.Group) != g || string(f.Peer) != a {
+		t.Fatalf("backlog: %+v", f)
+	}
+	if w := e.rest("GET", "/v1/envelopes", off, ""); !strings.Contains(w.Body.String(), `"group_id":"`+g+`"`) {
+		t.Fatalf("REST: %s", w.Body.String())
+	}
+	if w := e.rest("GET", "/v1/envelopes", off, ""); strings.Count(w.Body.String(), "group_id") != 1 {
+		t.Fatalf("group_id em 1:1: %s", w.Body.String())
+	}
+}
+
+// Membros de grupo em comum podem mandar Envelope 1:1 (a SKDM vai assim); bloqueio corta; sair do grupo corta.
+func TestGroupContacts(t *testing.T) {
+	e := newEnv(t)
+	a, b, c := e.user(), e.user(), e.user()
+	g := e.group(a, b, c)
+	e.block(a, c)
+	ca, cb := e.online(a), e.online(b)
+	ca.send(envelope(b, "skdm", "x"))
+	if f := ca.read(); f.Type != wire.Ack {
+		t.Fatalf("1:1 entre membros: %+v", f)
+	}
+	if f := cb.read(); f.Type != wire.Envelope || string(f.Peer) != a {
+		t.Fatalf("b: %+v", f)
+	}
+	ca.send(envelope(c, "skdm", "x"))
+	ca.wantError("forbidden")
+
+	if _, err := e.pool.Exec(context.Background(), `DELETE FROM group_members WHERE group_id = $1 AND user_id = $2`, g, b); err != nil {
+		t.Fatal(err)
+	}
+	e.hub.GroupChanged(g, []string{a, b})
+	if f := ca.read(); f.Type != wire.GroupChanged || string(f.Group) != g {
+		t.Fatalf("GroupChanged em a: %+v", f)
+	}
+	if f := cb.read(); f.Type != wire.GroupChanged || string(f.Group) != g {
+		t.Fatalf("GroupChanged em quem saiu: %+v", f)
+	}
+	ca.send(envelope(b, "depois", "x")) // contatos recarregados pelo GroupChanged
+	ca.wantError("forbidden")
+}
+
+func TestChatRateLimit(t *testing.T) {
+	e := newEnv(t)
+	e.hub.chat = ratelimit.New(chatPerMin)
+	a, b := e.user(), e.user()
+	e.friends(a, b)
+	g := e.group(a, b)
+	ca := e.online(a)
+	for i := range chatPerMin - 1 {
+		ca.send(envelope(b, fmt.Sprintf("m%d", i), "x"))
+		if f := ca.read(); f.Type != wire.Ack {
+			t.Fatalf("mensagem %d: %+v", i, f)
+		}
+	}
+	ca.send(groupEnv(g, "g1", "x")) // a de grupo conta 1
+	if f := ca.read(); f.Type != wire.Ack {
+		t.Fatalf("grupo: %+v", f)
+	}
+	ca.send(envelope(b, "demais", "x"))
+	ca.wantError("rate_limited")
+	ca.send(groupEnv(g, "demais", "x"))
+	ca.wantError("rate_limited")
+	if n := e.count(`SELECT count(*) FROM envelopes WHERE client_msg_id = 'demais'`); n != 0 {
+		t.Fatalf("gravou acima do limite: %d", n)
+	}
+}
+
+func TestPushOnlyOffline(t *testing.T) {
+	e := newEnv(t)
+	var mu sync.Mutex
+	var pinged []string
+	e.hub.Notify = func(u string) { mu.Lock(); pinged = append(pinged, u); mu.Unlock() }
+	a, on, off := e.user(), e.user(), e.user()
+	e.friends(a, on)
+	e.friends(a, off)
+	ca, con := e.online(a), e.online(on)
+	ca.send(envelope(on, "m1", "x"))
+	ca.read()
+	con.read()
+	ca.send(envelope(off, "m2", "x"))
+	ca.read()
+	ca.send(envelope(off, "m2", "x")) // reenvio: sem push de novo
+	ca.read()
+	mu.Lock()
+	defer mu.Unlock()
+	if fmt.Sprint(pinged) != fmt.Sprint([]string{off}) {
+		t.Fatalf("push: %v", pinged)
+	}
 }

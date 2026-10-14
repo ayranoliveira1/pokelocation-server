@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ayranoliveira1/pokelocation-server/internal/friends"
+	"github.com/ayranoliveira1/pokelocation-server/internal/groups"
 )
 
 type Store struct {
@@ -46,7 +47,9 @@ const (
 	qInsertRefresh = `INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
 			VALUES ($1, $2, $3, $4)`
 	qRevokeLookup = `SELECT user_id, family_id FROM refresh_tokens WHERE token_hash = $1`
-	qCleanup      = `DELETE FROM refresh_tokens WHERE id = ANY(ARRAY(
+	// O aparelho não pode receber ping (push) da conta que saiu.
+	qClearFCMOfUser = `UPDATE devices SET fcm_token = NULL WHERE user_id = $1`
+	qCleanup        = `DELETE FROM refresh_tokens WHERE id = ANY(ARRAY(
 			SELECT id FROM refresh_tokens WHERE expires_at < $1 ORDER BY expires_at LIMIT $2))`
 )
 
@@ -111,9 +114,11 @@ func (s *Store) version(ctx context.Context, id string) (int, error) {
 // ponytail: idem para um login do invasor com a senha velha que passa no argon2 logo antes do vínculo e grava a família
 // logo depois (login tem 5/min por email). Se virar caso real: no login, gravar o refresh com
 // INSERT … SELECT … FROM users WHERE id = $1 AND password_hash = $2 FOR NO KEY UPDATE (0 linhas → invalid_credentials).
-func (s *Store) linkGoogle(ctx context.Context, id, sub string) (bool, []string, error) {
+// Também tira a conta de todos os grupos (as mudanças voltam para o aviso depois do commit).
+func (s *Store) linkGoogle(ctx context.Context, id, sub string) (bool, []string, []groups.Change, error) {
 	ok := false
 	var ex []string
+	var changes []groups.Change
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, qLinkUser, id, sub)
 		if err != nil || tag.RowsAffected() == 0 {
@@ -125,6 +130,9 @@ func (s *Store) linkGoogle(ctx context.Context, id, sub string) (bool, []string,
 			return err
 		}
 		if ex, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+			return err
+		}
+		if changes, err = groups.LeaveAllTx(ctx, tx, id); err != nil {
 			return err
 		}
 		for _, q := range []string{
@@ -141,9 +149,9 @@ func (s *Store) linkGoogle(ctx context.Context, id, sub string) (bool, []string,
 		return nil
 	})
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
-	return ok, ex, nil
+	return ok, ex, changes, nil
 }
 
 func (s *Store) me(ctx context.Context, id string) (email *string, code string, err error) {
@@ -191,6 +199,9 @@ func (s *Store) rotate(ctx context.Context, old, next []byte, now, exp time.Time
 			if _, err := tx.Exec(ctx, qBumpVersion, user); err != nil {
 				return err
 			}
+			if _, err := tx.Exec(ctx, qClearFCMOfUser, user); err != nil {
+				return err
+			}
 			_, err = tx.Exec(ctx, qDelFamily, family)
 			revoked = user
 			return err
@@ -226,6 +237,9 @@ func (s *Store) revoke(ctx context.Context, hash []byte) (string, error) {
 			return err
 		}
 		if _, err := tx.Exec(ctx, qBumpVersion, user); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, qClearFCMOfUser, user); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, qDelFamily, family)

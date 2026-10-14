@@ -7,6 +7,7 @@ package relay
 
 import (
 	"testing"
+	"time"
 
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
@@ -27,6 +28,7 @@ func TestZeroAllocs(t *testing.T) {
 			}
 			h.relayEnvelope(ca, f, true)
 		},
+		"limite de chat": func() { h.chat.Allow(a, time.Unix(0, 0)) },
 		"posição": func() {
 			ob := getOut()
 			ob.b = append(ob.b, loc...)

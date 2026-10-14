@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ayranoliveira1/pokelocation-server/internal/httpx"
+	"github.com/ayranoliveira1/pokelocation-server/internal/ratelimit"
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
 
@@ -33,12 +34,15 @@ const (
 	maxAckIDs  = 100
 	// maxFriendsRead: teto de 500 amigos do friends, com folga; dado fora da regra não vira lista sem fim.
 	maxFriendsRead = 1000
-	pingEvery      = 30 * time.Second
-	idleWait       = 70 * time.Second // dois pings sem resposta
-	writeWait      = 10 * time.Second
-	dbWait         = 5 * time.Second
-	cleanupBatch   = 1000
-	batchWait      = 5 * time.Second
+	// maxGroupContacts: 25 grupos × 49 outros membros, com folga.
+	maxGroupContacts = 1300
+	chatPerMin       = 60 // Envelope + GroupEnvelope; um de grupo conta 1
+	pingEvery        = 30 * time.Second
+	idleWait         = 70 * time.Second // dois pings sem resposta
+	writeWait        = 10 * time.Second
+	dbWait           = 5 * time.Second
+	cleanupBatch     = 1000
+	batchWait        = 5 * time.Second
 )
 
 type Hub struct {
@@ -53,6 +57,10 @@ type Hub struct {
 	beforeRegister func()
 	afterRegister  func()
 	cl             *cluster // nil = uma instância só (EnableCluster liga)
+	chat           *ratelimit.Limiter
+
+	// Notify: envelope gravado para quem não tem conexão nesta instância (o main liga no push). nil = desligado.
+	Notify func(user string)
 }
 
 type shard struct {
@@ -62,10 +70,23 @@ type shard struct {
 
 // user: conexões em ordem de chegada. reload serializa as recargas da lista (ler o banco e gravar sob a trava): a
 // última gravada é sempre a lida por último.
+// friends recebe a posição; contacts (amigos e membros de grupos em comum, sem bloqueio) pode receber Envelope 1:1.
 type user struct {
-	conns   []*Conn
-	friends atomic.Pointer[friendSet]
-	reload  sync.Mutex
+	conns    []*Conn
+	friends  atomic.Pointer[friendSet]
+	contacts atomic.Pointer[friendSet]
+	reload   sync.Mutex
+}
+
+// setCircle: chamar com u.reload. Sem grupo em comum, contacts é a própria lista de amigos.
+func (u *user) setCircle(friends, coMembers []string) {
+	fs := newFriendSet(friends)
+	cs := fs
+	if len(coMembers) > 0 {
+		cs = newFriendSet(slices.Concat(friends, coMembers))
+	}
+	u.friends.Store(fs)
+	u.contacts.Store(cs)
 }
 
 // friendSet: imutável (o ReloadFriends troca o conjunto inteiro). UUIDs canônicos de 36 bytes, ordenados, num blob
@@ -108,7 +129,8 @@ func (fs *friendSet) has(peer []byte) bool {
 // frames Location e LocationOff do cliente.
 func New(pool *pgxpool.Pool, parse func(token string) (string, time.Time, int, error),
 	onLocation func(c *Conn, f wire.Frame)) *Hub {
-	h := &Hub{store: &Store{pool: pool}, parse: parse, onLocation: onLocation, authWait: 5 * time.Second, dbWait: dbWait}
+	h := &Hub{store: &Store{pool: pool}, parse: parse, onLocation: onLocation, authWait: 5 * time.Second, dbWait: dbWait,
+		chat: ratelimit.New(chatPerMin)}
 	h.up = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -156,6 +178,7 @@ func (h *Hub) register(c *Conn, fs *friendSet) {
 	}
 	if fs != nil {
 		u.friends.CompareAndSwap(nil, fs)
+		u.contacts.CompareAndSwap(nil, fs)
 	}
 	c.u = u
 	var evicted *Conn
@@ -242,6 +265,55 @@ func (h *Hub) relayEnvelope(from *Conn, f wire.Frame, fresh bool) {
 	env.b = wire.AppendEnvelope(env.b, from.userB, f.MsgID, f.Payload)
 	h.deliver(f.Peer, env, false)
 	env.release()
+	h.notifyOffline(f.Peer)
+}
+
+// relayGroup: Ack{to = grupo} ao remetente e um frame só, compartilhado, para as cópias novas.
+func (h *Hub) relayGroup(from *Conn, f wire.Frame, recipients []string) {
+	ack := getOut()
+	ack.b = wire.AppendAck(ack.b, f.Group, f.MsgID)
+	h.deliver(from.userB, ack, false)
+	ack.release()
+	if len(recipients) == 0 {
+		return
+	}
+	env := getOut()
+	env.b = wire.AppendGroupEnvelope(env.b, f.Group, f.MsgID, f.Payload, from.userB)
+	for _, r := range recipients {
+		id := []byte(r)
+		h.deliver(id, env, false)
+		h.notifyOffline(id)
+	}
+	env.release()
+}
+
+// ponytail: só olha esta instância; com o cluster, quem está online em outra também recebe o ping (inofensivo pela
+// collapse key, mas gasta cota). Consultar a presença do cluster aqui se a cota apertar.
+func (h *Hub) notifyOffline(user []byte) {
+	if h.Notify == nil {
+		return
+	}
+	s := h.shardOf(fnv(user))
+	s.mu.Lock()
+	_, online := s.users[string(user)]
+	s.mu.Unlock()
+	if !online {
+		h.Notify(string(user))
+	}
+}
+
+// GroupChanged recarrega os contatos de users (quem entrou pode receber a SKDM 1:1 já) e só depois avisa com o
+// frame 9, pelo deliver (atravessa o cluster).
+func (h *Hub) GroupChanged(groupID string, users []string) {
+	for _, u := range users {
+		h.ReloadFriends(u)
+	}
+	ob := getOut()
+	ob.b = wire.AppendGroupChanged(ob.b, []byte(groupID))
+	for _, u := range users {
+		h.deliver([]byte(u), ob, false)
+	}
+	ob.release()
 }
 
 // Buf: buffer do pool do Hub para montar o frame do SendFriends.
@@ -313,14 +385,14 @@ func (h *Hub) session(u *user, id string, version int) (int64, error) {
 	defer u.reload.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), h.dbWait)
 	defer cancel()
-	current, cutoff, ids, err := h.store.session(ctx, id)
+	current, cutoff, friends, coMembers, err := h.store.session(ctx, id)
 	if errors.Is(err, errNoUser) || err == nil && current != version {
 		return 0, errRevoked
 	}
 	if err != nil {
 		return 0, err
 	}
-	u.friends.Store(newFriendSet(ids))
+	u.setCircle(friends, coMembers)
 	return cutoff, nil
 }
 
@@ -329,12 +401,12 @@ func (h *Hub) reload(u *user, id string) error {
 	defer u.reload.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), h.dbWait)
 	defer cancel()
-	ids, err := h.store.friends(ctx, id)
+	friends, coMembers, err := h.store.circle(ctx, id)
 	if err != nil {
 		logDB("relay: amigos", err)
 		return err
 	}
-	u.friends.Store(newFriendSet(ids))
+	u.setCircle(friends, coMembers)
 	return nil
 }
 
