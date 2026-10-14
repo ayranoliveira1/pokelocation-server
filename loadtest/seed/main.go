@@ -1,5 +1,5 @@
-// Semeador da auditoria de banco: volume e distribuição parecidos com produção, para os planos do Postgres serem os
-// de verdade. Só no Postgres de loadtest/seed/pg.sh: apaga tudo antes de semear.
+// Semeador da auditoria de banco, com volume e distribuição de produção para os planos serem os de verdade. Apaga tudo
+// antes de semear: só no Postgres de loadtest/seed/pg.sh.
 //
 //	go run ./loadtest/seed -db "$(loadtest/seed/pg.sh url)"
 package main
@@ -108,7 +108,7 @@ func seedUsers(ctx context.Context, c *pgx.Conn) []string {
 				}
 				codes[code] = true
 				email, hash, sub := any(fmt.Sprintf("u%d@seed.test", i)), any("$argon2id$v=19$m=19456,t=2,p=1$seed$seed"), any(nil)
-				if rn(5) == 0 { // ~20% entram pelo Google
+				if rn(5) == 0 {
 					hash, sub = nil, "g"+strconv.Itoa(i)
 				}
 				row := []any{ids[i], email, fmt.Sprintf("u%d", i), hash, sub, code, ago(365 * 24 * time.Hour)}
@@ -119,8 +119,6 @@ func seedUsers(ctx context.Context, c *pgx.Conn) []string {
 	return ids
 }
 
-// seedFriendships: metade dos pares é uniforme e metade escolhe um dos lados por Zipf (há quem tenha centenas de
-// amigos), respeitando os tetos por usuário e o par único em qualquer direção.
 func seedFriendships(ctx context.Context, c *pgx.Conn, ids []string) {
 	n := len(ids)
 	popular := zipf(1, 1.07, 2, n)
@@ -182,8 +180,6 @@ func seedFriendships(ctx context.Context, c *pgx.Conn, ids []string) {
 	})
 }
 
-// seedEnvelopes: a maioria das filas é curta, mas 20% dos envelopes vão para destinatários por Zipf (quem ficou
-// semanas sem abrir o app acumula milhares).
 func seedEnvelopes(ctx context.Context, c *pgx.Conn, ids []string) {
 	n := len(ids)
 	heavy := zipf(3, 1.2, 4, n)
@@ -206,7 +202,6 @@ func seedEnvelopes(ctx context.Context, c *pgx.Conn, ids []string) {
 	})
 }
 
-// seedRefresh mistura famílias ativas, já rotacionadas (used_at) e vencidas.
 func seedRefresh(ctx context.Context, c *pgx.Conn, ids []string) {
 	u, left := 0, 0
 	var family string
@@ -251,7 +246,6 @@ func seedKeys(ctx context.Context, c *pgx.Conn, ids []string) {
 			})
 	})
 
-	// Prekeys só existem para quem enviou o pacote de chaves, isto é, quem tem aparelho.
 	var withKeys []string
 	rows, err := c.Query(ctx, `SELECT user_id::text FROM devices TABLESAMPLE BERNOULLI ($1)`, *prekeyRate/(*deviceRate)*100)
 	if err != nil {
@@ -305,7 +299,6 @@ func exec(ctx context.Context, c *pgx.Conn, sql string) {
 	}
 }
 
-// Aleatoriedade só para volume de teste, nunca segredo: um #nosec por helper em vez de um por chamada.
 func rn(n int) int     { return mrand.IntN(n) }   // #nosec G404 -- dados de teste
 func rf() float64      { return mrand.Float64() } // #nosec G404 -- dados de teste
 func perm(n int) []int { return mrand.Perm(n) }   // #nosec G404 -- dados de teste

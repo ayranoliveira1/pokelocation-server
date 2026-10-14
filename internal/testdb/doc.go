@@ -10,8 +10,5 @@
 //
 //	func TestMain(m *testing.M) { testdb.Main(m) }
 //
-// RequireIndex confere o plano de uma query (com os valores e o genérico): num Pool, com seqscan desligado; num Seed
-// (S12_DATABASE_URL), com o planejador de verdade. Cada pacote testa as próprias queries, pelas constantes do store.
-//
 // internal/db não pode usar este pacote (import circular) e sobe o próprio container.
 package testdb

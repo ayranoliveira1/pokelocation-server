@@ -29,7 +29,6 @@ func createGroup(s *server, owner user, members ...user) string {
 	return r.str("id")
 }
 
-// group devolve owner_id e os user_id de GET /v1/groups/{id} (members: [{user_id, username}]); ok = 200.
 func group(s *server, u user, gid string) (owner string, members []string, ok bool) {
 	s.t.Helper()
 	owner, m, ok := groupNames(s, u, gid)
@@ -39,7 +38,6 @@ func group(s *server, u user, gid string) (owner string, members []string, ok bo
 	return owner, members, ok
 }
 
-// groupNames: como group, com user_id → username.
 func groupNames(s *server, u user, gid string) (owner string, members map[string]string, ok bool) {
 	s.t.Helper()
 	r := s.do("GET", "/v1/groups/"+gid, u.access, nil)
@@ -56,7 +54,7 @@ func groupNames(s *server, u user, gid string) (owner string, members map[string
 	return r.str("owner_id"), members, true
 }
 
-// seedFriendIDs cria n amigos aceitos de u direto no banco (os limites da API levariam minutos) e devolve os ids.
+// seedFriendIDs vai direto no banco: pela API, os limites levariam minutos.
 func seedFriendIDs(s *server, u string, n int) []string {
 	s.t.Helper()
 	rows, err := s.pool.Query(context.Background(), `WITH nu AS (
@@ -84,7 +82,6 @@ func seedFriendIDs(s *server, u string, n int) []string {
 	return ids
 }
 
-// Criar, listar, adicionar, remover, sair e passar o dono (docs/api.md §7).
 func TestGrupoMembros(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/groups")
@@ -132,20 +129,18 @@ func TestGrupoMembros(t *testing.T) {
 	}
 	s.check("sair", del(d, d.id), 204, "")
 
-	// O dono saindo passa o grupo ao membro mais antigo; o último saindo apaga o grupo.
 	s.check("dono sai", del(a, a.id), 204, "")
 	if owner, m, ok := group(s, b, gid); !ok || owner != b.id || len(m) != 1 {
 		t.Errorf("depois do dono sair: dono %s, membros %v (esperado só b, dono)", owner, m)
 	}
 	s.check("último sai", del(b, b.id), 204, "")
-	// Quem saiu recebe 404 de qualquer jeito: o banco é que diz se o grupo sumiu.
+	// Quem saiu recebe 404 de qualquer jeito: só o banco diz se o grupo sumiu.
 	var n int
 	if err := s.pool.QueryRow(context.Background(), `SELECT count(*) FROM groups WHERE id = $1`, gid).Scan(&n); err != nil || n != 0 {
 		t.Errorf("grupo sem membros continua no banco (%d, %v)", n, err)
 	}
 }
 
-// 50 membros por grupo (contando o dono) e 25 grupos por usuário → 409.
 func TestGrupoTetos(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/groups")
@@ -172,7 +167,6 @@ func TestGrupoTetos(t *testing.T) {
 		map[string]string{"user_id": x.id}), 409, "too_many_groups")
 }
 
-// Fan-out: um GroupEnvelope vira uma cópia por membro; quem não é membro não manda nem recebe. docs/api.md §7.
 func TestGrupoMensagens(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/groups")
@@ -208,7 +202,6 @@ func TestGrupoMensagens(t *testing.T) {
 	wd.group(nobody, "x2", s.payload(32))
 	wd.expectErr("forbidden")
 
-	// A cópia de cada um é dele: ack de quem não é o destinatário daquela cópia não apaga.
 	r := s.do("GET", "/v1/envelopes", b.access, nil)
 	s.want(r, 200, "")
 	if !bytes.Contains(r.raw, []byte(`"group_id":"`+gid+`"`)) {
@@ -221,7 +214,6 @@ func TestGrupoMensagens(t *testing.T) {
 		t.Error("ack de outro membro apagou a cópia de b")
 	}
 
-	// Bloqueio vale dentro do grupo, nos dois sentidos.
 	s.want(s.do("POST", "/v1/blocks/"+a.id, f.access, nil), 204, "")
 	wa.group(gid, "m2", s.payload(32))
 	wa.expect(wire.Ack, 3*time.Second)
@@ -234,7 +226,6 @@ func TestGrupoMensagens(t *testing.T) {
 	wc.expect(wire.GroupEnvelope, 3*time.Second)
 	wa.silent("bloqueado recebeu de quem o bloqueou", time.Second)
 
-	// Removido e quem sai recebem GroupChanged e param de receber na hora.
 	s.want(s.do("DELETE", "/v1/groups/"+gid+"/members/"+c.id, a.access, nil), 204, "")
 	for name, w := range map[string]*wsConn{"a": wa, "b": wb, "c (removido)": wc} {
 		if g := w.expect(wire.GroupChanged, 3*time.Second); string(g.Group) != gid {
@@ -257,7 +248,6 @@ func TestGrupoMensagens(t *testing.T) {
 	wc.silent("removido recebeu GroupChanged de saída alheia", quiet)
 }
 
-// Membros de um grupo em comum trocam chaves e Envelope 1:1 sem serem amigos; estranhos não. docs/api.md §4, §6, §7.
 func TestGrupoChavesEntreMembros(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/groups")
@@ -281,7 +271,6 @@ func TestGrupoChavesEntreMembros(t *testing.T) {
 	}
 	wb.expect(wire.Ack, 3*time.Second)
 
-	// Sem grupo em comum, volta a ser estranho.
 	s.want(s.do("DELETE", "/v1/groups/"+gid+"/members/"+c.id, a.access, nil), 204, "")
 	wb.expect(wire.GroupChanged, 3*time.Second)
 	wc.expect(wire.GroupChanged, 3*time.Second)
@@ -290,7 +279,6 @@ func TestGrupoChavesEntreMembros(t *testing.T) {
 	wb.expectErr("forbidden")
 }
 
-// 60 mensagens por minuto por usuário; um GroupEnvelope conta 1, por maior que seja o grupo. docs/api.md §7 (S11).
 func TestGrupoLimiteDeChat(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/groups")
@@ -328,7 +316,6 @@ func TestGrupoLimiteDeChat(t *testing.T) {
 	t.Errorf("nenhum rate_limited em %d mensagens", passed)
 }
 
-// pings lê as linhas {"msg":"fcm ping","user":…} do log do servidor (o FCM falso, sem FCM_CREDENTIALS).
 func (s *server) pings() map[string]int {
 	out := map[string]int{}
 	for _, l := range strings.Split(s.logs.String(), "\n") {
@@ -340,7 +327,6 @@ func (s *server) pings() map[string]int {
 	return out
 }
 
-// O ping vai só para quem está sem conexão e tem fcm_token; nunca leva token nem conteúdo. docs/api.md §7 (S10).
 func TestFCMSoOffline(t *testing.T) {
 	s := start(t)
 	s.need("PUT", "/v1/devices/fcm")
@@ -350,7 +336,7 @@ func TestFCMSoOffline(t *testing.T) {
 	}
 	s.check("FCM sem aparelho", s.do("PUT", "/v1/devices/fcm", on.access, map[string]string{"token": "fcm-x"}), 404, "not_found")
 	for _, u := range []user{on, off} {
-		// O token FCM vai no aparelho: o app manda as chaves (PUT /v1/keys) antes, no login.
+		// O token FCM fica no aparelho: sem PUT /v1/keys antes, o PUT do token dá 404.
 		s.want(s.do("PUT", "/v1/keys", u.access, newBundle(1, 1)), 204, "")
 		tok := "fcm-" + rand.Text() + rand.Text()
 		s.secret(tok)

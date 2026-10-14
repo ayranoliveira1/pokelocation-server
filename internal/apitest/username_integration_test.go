@@ -11,8 +11,7 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/username"
 )
 
-// noUsername cria uma conta como a do 1º login Google (sem @nome) direto no banco e assina o access dela: o apitest não
-// passa pelo OAuth do Google.
+// noUsername imita o 1º login Google direto no banco: o apitest não passa pelo OAuth.
 func noUsername(s *server) user {
 	s.t.Helper()
 	u := user{}
@@ -33,7 +32,6 @@ func setUsername(s *server, u user, name string) resp {
 	return s.do("PUT", "/v1/me/username", u.access, map[string]string{"username": name})
 }
 
-// Cadastro: o @nome é obrigatório, validado pelas regras do §8, normalizado e único.
 func TestUsernameCadastro(t *testing.T) {
 	s := start(t)
 	s.need("PUT", "/v1/me/username")
@@ -67,7 +65,6 @@ func TestUsernameCadastro(t *testing.T) {
 	}
 }
 
-// Sem @nome, as rotas de amigos, chaves, grupos, fila, posições e FCM dão 403 username_required; o WS também.
 func TestUsernameObrigatorio(t *testing.T) {
 	s := start(t)
 	s.need("PUT", "/v1/me/username")
@@ -109,7 +106,6 @@ func TestUsernameObrigatorio(t *testing.T) {
 	w.ready()
 }
 
-// Troca: até 5 por dia, repetir o atual não conta, o nome antigo fica livre na hora.
 func TestUsernameTroca(t *testing.T) {
 	s := start(t)
 	s.need("PUT", "/v1/me/username")
@@ -132,7 +128,6 @@ func TestUsernameTroca(t *testing.T) {
 	s.check("6ª troca no dia", setUsername(s, a, newUsername("t6")), 429, "rate_limited")
 }
 
-// Pedido por @nome ou por código; inexistente e quem te bloqueou são indistinguíveis; o limite de 10/min soma os dois.
 func TestUsernamePedido(t *testing.T) {
 	s := start(t)
 	s.need("PUT", "/v1/me/username")
@@ -157,7 +152,7 @@ func TestUsernamePedido(t *testing.T) {
 		t.Errorf("respostas distinguíveis: %q × %q", missing.raw, blocked.raw)
 	}
 
-	// z não pediu nada ainda: alterna @nome e código inexistentes; o 429 vem com os dois somados.
+	// Alterna @nome e código: o limite soma os dois.
 	s.bucket("pedidos por @nome e código", 10, 6*time.Second, time.Now(), 404, func(i int) resp {
 		if i%2 == 0 {
 			return req(z, map[string]string{"username": newUsername("x")})
@@ -166,7 +161,6 @@ func TestUsernamePedido(t *testing.T) {
 	})
 }
 
-// O @nome aparece nas listas de amigos, nas posições e nos membros dos grupos.
 func TestUsernameNasListas(t *testing.T) {
 	s := start(t)
 	s.need("PUT", "/v1/me/username")
@@ -200,7 +194,7 @@ func TestUsernameNasListas(t *testing.T) {
 	}
 }
 
-// O register manda newUsername(nome do teste): tem de passar pela regra oficial, senão todo o apitest cai com 400.
+// Se newUsername sair da regra oficial, todo register do apitest cai com 400.
 func TestNewUsernameValido(t *testing.T) {
 	for _, name := range []string{"a", "fuzz", "semtoken", "f1", "nomecompridodemais"} {
 		n := newUsername(name)

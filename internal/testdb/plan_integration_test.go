@@ -13,7 +13,7 @@ func TestPlan(t *testing.T) {
 	s := testdb.SampleOf(t, pool)
 	testdb.RequireIndex(t, pool, `SELECT id FROM users WHERE email = $1`, []any{s.Email}, "users_email_key")
 
-	// Sem índice que sirva, nem com seqscan desligado o plano sai do Seq Scan: é assim que um índice sumido reprova.
+	// Sem índice que sirva, nem com seqscan desligado o plano sai do Seq Scan.
 	seq := func(n testdb.PlanNode) bool { return n.Type == "Seq Scan" }
 	if !slices.ContainsFunc(testdb.Plan(t, pool, `SELECT id FROM users WHERE password_hash = $1`, "x"), seq) {
 		t.Error("query sem índice não deu Seq Scan")

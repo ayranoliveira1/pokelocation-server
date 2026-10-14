@@ -48,9 +48,7 @@ var (
 )
 
 // Pool devolve um banco novo, já migrado, apagado no fim do teste.
-//
-// Com TESTDB_POSTGRES_URL, usa esse banco já migrado, compartilhado e sem limpeza (a auditoria roda os testes
-// sobre o seed de loadtest/seed): os testes não podem depender de banco vazio.
+// Com TESTDB_POSTGRES_URL o banco é compartilhado e não é limpo: os testes não podem depender de banco vazio.
 func Pool(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	if url := os.Getenv("TESTDB_POSTGRES_URL"); url != "" {

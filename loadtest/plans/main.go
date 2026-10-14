@@ -1,10 +1,5 @@
-// Coleta os planos reais das queries do servidor no Postgres da auditoria (loadtest/seed/pg.sh):
-//
-//	go run ./loadtest/plans on       # zera pg_stat_statements e liga auto_explain para tudo
-//	... roda o apitest e a carga contra esse Postgres ...
-//	go run ./loadtest/plans report   # desliga, junta auto_explain + pg_stat_statements e imprime a tabela
-//
-// O auto_explain vai para o log do container (stderr); as linhas de continuação de uma mensagem vêm com um tab.
+// Planos reais das queries no Postgres da auditoria: "on", roda o apitest e a carga, "report".
+// O auto_explain vai para o stderr do container, e cada linha de continuação de uma mensagem começa com tab.
 package main
 
 import (
@@ -149,7 +144,7 @@ func report(ctx context.Context, c *pgx.Conn, since string) {
 		fmt.Printf("| %d | `%s` | %d | %.3f | %.3f | %.1f | %.1f / %.1f | %s | %s |\n",
 			i+1, short(q, 110), s.calls, s.mean, s.max, s.rowsPer, s.hit, s.rd, plan, alert)
 	}
-	// Queries internas (checagens de FK, cascatas) só aparecem no auto_explain (log_nested_statements).
+	// Checagens e cascatas de FK só aparecem no auto_explain.
 	var extra []string
 	for k := range plans {
 		if !matched[k] {
@@ -167,7 +162,6 @@ func report(ctx context.Context, c *pgx.Conn, since string) {
 	}
 }
 
-// readPlans: por query normalizada, o plano da execução mais lenta.
 func readPlans(since string) map[string]*agg {
 	out, err := exec.Command("docker", "logs", "--since", since, *container).CombinedOutput() // #nosec G204 -- nome do container vem da flag
 	if err != nil {
@@ -214,7 +208,6 @@ func readPlans(since string) map[string]*agg {
 	return plans
 }
 
-// summarize: nós de acesso e ordenação do plano; alerta para Seq Scan em tabela grande e para Sort.
 func summarize(n node, big map[string]float64) (plan, alert string) {
 	var parts, alerts []string
 	var walk func(n node)
@@ -250,10 +243,9 @@ var (
 
 func norm(q string) string { return strings.TrimSpace(spaces.ReplaceAllString(q, " ")) }
 
-// key junta as duas fontes: o pg_stat_statements troca constantes por $n e o auto_explain guarda o texto original.
+// key: o pg_stat_statements troca constantes por $n, e o auto_explain guarda o texto original.
 func key(q string) string { return literals.ReplaceAllString(norm(q), "?") }
 
-// Queries das ferramentas da auditoria (seed, limpeza do loadtest, seed do apitest), não do servidor.
 var toolPrefixes = []string{"copy ", "DELETE FROM users WHERE email LIKE", "WITH nu AS ( INSERT INTO users", "TRUNCATE", "VACUUM"}
 
 func fromTool(q string) bool {

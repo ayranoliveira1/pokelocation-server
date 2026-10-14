@@ -76,7 +76,7 @@ func startWith(t testing.TB, redisURL string) *server {
 	t.Helper()
 	pool := testdb.Pool(t)
 	buildOnce.Do(func() {
-		// APITEST_SERVER_BIN: testa um binário já compilado (ex.: o HEAD, quando a árvore está no meio de uma mudança).
+		// APITEST_SERVER_BIN: binário pronto, para testar o HEAD quando a árvore não compila.
 		if b := os.Getenv("APITEST_SERVER_BIN"); b != "" {
 			binPath = b
 			return
@@ -155,8 +155,7 @@ func (s *server) on(t *testing.T) *server {
 	return &c
 }
 
-// need: 404 em texto é do ServeMux (rota ausente), não o not_found em JSON do contrato. Rota do contrato que falta é
-// falha: o main tem de montar todas.
+// need: 404 em texto é do ServeMux (rota não montada), não o not_found em JSON do contrato.
 func (s *server) need(method, path string) {
 	s.t.Helper()
 	req, _ := http.NewRequest(method, s.base+path, nil)
@@ -284,7 +283,6 @@ func (s *server) match(r resp, status int, code string) bool {
 
 type user struct{ id, email, password, code, username, access, refresh string }
 
-// newUsername: único, no formato do §8 (começa com letra, [a-z0-9_.], até 20). O nome do teste vem primeiro para ler.
 func newUsername(name string) string {
 	return fmt.Sprintf("%.8s_%s", name, strings.ToLower(rand.Text()[:8]))
 }
