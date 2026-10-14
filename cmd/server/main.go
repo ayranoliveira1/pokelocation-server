@@ -3,11 +3,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -30,6 +32,7 @@ import (
 type config struct {
 	addr, databaseURL, redisURL string
 	pprofAddr                   string
+	logRequests                 bool
 	cluster                     bool
 	auth                        auth.Config
 }
@@ -41,6 +44,7 @@ func loadConfig() (config, error) {
 		redisURL:    os.Getenv("REDIS_URL"),
 		pprofAddr:   os.Getenv("PPROF_ADDR"),
 		cluster:     os.Getenv("CLUSTER") == "1",
+		logRequests: os.Getenv("LOG_REQUESTS") == "1",
 		auth: auth.Config{
 			SigningKey:         os.Getenv("AUTH_SIGNING_KEY"),
 			GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
@@ -122,7 +126,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           mux,
+		Handler:           withRequestLog(cfg.logRequests, mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    8 << 10,
@@ -190,3 +194,36 @@ func servePprof(addr string) {
 		slog.Warn("pprof parado", "err_type", fmt.Sprintf("%T", err))
 	}
 }
+
+// withRequestLog: só para depurar no local (LOG_REQUESTS=1). Rota sem query, nunca corpo nem cabeçalhos: a query do
+// login Google leva o code, e o Authorization leva o token.
+func withRequestLog(on bool, next http.Handler) http.Handler {
+	if !on {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		slog.Info("req", "method", r.Method, "path", r.URL.Path, "status", sw.status,
+			"ms", float64(time.Since(start).Microseconds())/1000)
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack: o upgrade do WebSocket precisa do http.Hijacker de baixo.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.status = http.StatusSwitchingProtocols
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
