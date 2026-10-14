@@ -19,11 +19,9 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
 
-// docs/api.md §5–§6 (S6 relay, S7 location) contra o binário real. Sem /v1/ws no main, tudo pula.
+const quiet = 700 * time.Millisecond // o servidor repassa em ~ms
 
-const quiet = 700 * time.Millisecond // "não chegou nada": espera curta, o servidor repassa em ~ms
-
-// wsConn: um leitor em goroutine joga os frames num canal (gorilla não deixa ler de novo depois de um timeout).
+// wsConn lê numa goroutine e entrega por canal: o gorilla não deixa ler de novo depois de um timeout.
 type wsConn struct {
 	s      *server
 	c      *websocket.Conn
@@ -33,10 +31,9 @@ type wsConn struct {
 	wmu    sync.Mutex
 }
 
-// ws abre /v1/ws e, com token, manda o Auth. buf = frames guardados do lado do teste (0 = cliente lento: o TCP enche
-// e o servidor sente a contrapressão).
 func (s *server) ws(token string) *wsConn { return s.wsBuf(token, 1024) }
 
+// wsBuf com buf 0 simula cliente lento: o TCP enche e o servidor sente a contrapressão.
 func (s *server) wsBuf(token string, buf int) *wsConn {
 	s.t.Helper()
 	n := ipSeq.Add(1)
@@ -88,7 +85,7 @@ func (w *wsConn) send(b []byte) {
 	}
 }
 
-// next devolve o próximo frame; closed = a conexão terminou sem mais frames.
+// next: closed = a conexão terminou sem mais frames.
 func (w *wsConn) next(within time.Duration) (f wire.Frame, closed, timeout bool) {
 	select {
 	case f = <-w.frames:
@@ -110,7 +107,6 @@ func (w *wsConn) next(within time.Duration) (f wire.Frame, closed, timeout bool)
 	}
 }
 
-// expect exige que o próximo frame seja do tipo typ.
 func (w *wsConn) expect(typ byte, within time.Duration) wire.Frame {
 	w.s.t.Helper()
 	f, closed, timeout := w.next(within)
@@ -132,7 +128,6 @@ func (w *wsConn) expectErr(code string) {
 	}
 }
 
-// silent: nada chega em d (o que não deve ser repassado não é).
 func (w *wsConn) silent(what string, d time.Duration) {
 	w.s.t.Helper()
 	if f, closed, _ := w.next(d); !closed && f.Type != 0 {
@@ -140,7 +135,7 @@ func (w *wsConn) silent(what string, d time.Duration) {
 	}
 }
 
-// expectClose espera o close do servidor com o código dado (frames antes do close são ignorados).
+// expectClose ignora os frames que chegarem antes do close.
 func (w *wsConn) expectClose(code int, within time.Duration) {
 	w.s.t.Helper()
 	select {
@@ -154,7 +149,7 @@ func (w *wsConn) expectClose(code int, within time.Duration) {
 	}
 }
 
-// ready garante que o Auth já foi processado: um frame inválido tem de voltar como bad_frame.
+// ready prova que o Auth já foi processado: o servidor só responde bad_frame depois dele.
 func (w *wsConn) ready() {
 	w.s.t.Helper()
 	w.send([]byte{0xff})
@@ -169,7 +164,7 @@ func (w *wsConn) envelope(to user, id string, p []byte) {
 
 func (w *wsConn) ack(from user, id string) { w.send(wire.AppendAck(nil, []byte(from.id), []byte(id))) }
 
-// payload com um marcador registrado como segredo: o log do servidor nunca pode conter payload (api.md §1).
+// payload leva um marcador registrado como segredo: o log do servidor nunca pode conter payload.
 func (s *server) payload(n int) []byte {
 	mark := "PAYLOAD-" + rand.Text()
 	s.secret(mark)
@@ -188,7 +183,7 @@ func describe(f wire.Frame) string {
 	return fmt.Sprintf("%s{peer=%s msg=%s code=%s payload=%dB}", frameName(f.Type), f.Peer, f.MsgID, f.Code, len(f.Payload))
 }
 
-// envelopes de GET /v1/envelopes: "from|client_msg_id" → id.
+// pending: "from|client_msg_id" → id.
 func pending(s *server, u user) map[string]string {
 	s.t.Helper()
 	r := s.do("GET", "/v1/envelopes", u.access, nil)
@@ -202,7 +197,7 @@ func pending(s *server, u user) map[string]string {
 	return out
 }
 
-// locations de GET /v1/locations: user_id → payload (bytes).
+// locations: user_id → payload.
 func locations(s *server, u user) map[string][]byte {
 	s.t.Helper()
 	r := s.do("GET", "/v1/locations", u.access, nil)
@@ -220,7 +215,7 @@ func locations(s *server, u user) map[string][]byte {
 	return out
 }
 
-// eventually: o GET /v1/locations pode estar até 1 s atrás do WS (gravação em lote no Redis).
+// eventually: o GET /v1/locations pode estar até 1 s atrás do WS (o Redis é gravado em lote).
 func eventually(s *server, what string, cond func() bool) {
 	s.t.Helper()
 	for deadline := time.Now().Add(3 * time.Second); !cond(); time.Sleep(100 * time.Millisecond) {
@@ -231,7 +226,7 @@ func eventually(s *server, what string, cond func() bool) {
 	}
 }
 
-// waitLoc espera o limite de Location (1 a cada 5 s por usuário, aceito com ≥ 4 s) desde last.
+// waitLoc: o servidor aceita 1 Location a cada ≥ 4 s por usuário.
 func waitLoc(last time.Time) { time.Sleep(time.Until(last.Add(4200 * time.Millisecond))) }
 
 func TestWSAuth(t *testing.T) {
@@ -287,7 +282,7 @@ func TestWSAuth(t *testing.T) {
 		w.expectClose(1009, 3*time.Second)
 	})
 
-	// Frame ruim → Error{bad_frame} e a conexão continua (api.md §6).
+	// A conexão continua depois de cada bad_frame.
 	t.Run("frames inválidos não derrubam", func(t *testing.T) {
 		s := s.on(t)
 		w := s.ws(a.access)
@@ -320,7 +315,6 @@ func TestWSAuth(t *testing.T) {
 	})
 }
 
-// Matriz de permissões no WS: posição só para amigo, envelope só para amigo, ack só do destinatário. api.md §5–§6.
 func TestWSMatriz(t *testing.T) {
 	s := start(t)
 	s.need("GET", "/v1/ws")
@@ -332,7 +326,7 @@ func TestWSMatriz(t *testing.T) {
 		w.ready()
 	}
 
-	// Posição: vai aos amigos online; a 2ª antes de 4 s é descartada em silêncio.
+	// A 2ª posição antes de 4 s é descartada em silêncio.
 	p1 := s.payload(64)
 	lastA := time.Now()
 	wa.location(p1)
@@ -359,7 +353,6 @@ func TestWSMatriz(t *testing.T) {
 		t.Error("a vê a posição de não-amigo no GET /v1/locations")
 	}
 
-	// Envelope: só para amigo; o destinatário recebe com o from verdadeiro; o remetente recebe o Ack S→C.
 	wa.envelope(c, "x1", s.payload(32))
 	wa.expectErr("forbidden")
 	wc.silent("não-amigo recebeu envelope", quiet)
@@ -372,12 +365,11 @@ func TestWSMatriz(t *testing.T) {
 	if f := wa.expect(wire.Ack, 3*time.Second); string(f.Peer) != b.id || string(f.MsgID) != "m1" {
 		t.Errorf("a recebeu %s, esperado Ack{to b, m1}", describe(f))
 	}
-	// Reenvio do mesmo client_msg_id: ignorado, mas com Ack de novo.
+	// Reenvio do mesmo client_msg_id é ignorado, mas recebe o Ack de novo.
 	wa.envelope(b, "m1", m1)
 	wa.expect(wire.Ack, 3*time.Second)
 	wb.silent("reenvio do mesmo client_msg_id entregue de novo", quiet)
 
-	// Ack de quem não é o destinatário não apaga (nem pelo WS nem pelo REST).
 	envID, ok := pending(s, b)[a.id+"|m1"]
 	if !ok {
 		t.Fatalf("GET /v1/envelopes de b sem o m1: %v", pending(s, b))
@@ -395,7 +387,6 @@ func TestWSMatriz(t *testing.T) {
 	wb.ack(a, "m1")
 	eventually(s, "Ack de b apaga o m1", func() bool { _, ok := pending(s, b)[a.id+"|m1"]; return !ok })
 
-	// LocationOff: some do GET e os amigos são avisados.
 	wa.send(wire.AppendLocationOff(nil, nil))
 	if f := wb.expect(wire.LocationOff, 3*time.Second); string(f.Peer) != a.id {
 		t.Errorf("b recebeu %s, esperado LocationOff{a}", describe(f))
@@ -406,7 +397,6 @@ func TestWSMatriz(t *testing.T) {
 	wc.silent("não-amigo recebeu LocationOff", quiet)
 	eventually(s, "posição de a some depois do LocationOff", func() bool { _, ok := locations(s, b)[a.id]; return !ok })
 
-	// Ex-amigo para de receber na hora: desfazer a amizade.
 	s.want(s.do("DELETE", "/v1/friends/"+a.id, b.access, nil), 204, "")
 	waitLoc(lastA)
 	lastA = time.Now()
@@ -418,7 +408,6 @@ func TestWSMatriz(t *testing.T) {
 	wa.envelope(b, "m2", s.payload(32))
 	wa.expectErr("forbidden")
 
-	// Bloqueio vale nos dois sentidos, na hora.
 	s.want(s.do("POST", "/v1/blocks/"+a.id, d.access, nil), 204, "")
 	wd.location(s.payload(64))
 	wa.silent("bloqueado recebeu a posição de quem bloqueou", time.Second)
@@ -431,7 +420,6 @@ func TestWSMatriz(t *testing.T) {
 	wd.expectErr("forbidden")
 }
 
-// Até 4 conexões por usuário: a 5ª derruba a mais antiga; todas recebem; o 1º Ack apaga. api.md §6.
 func TestWSMultiConexao(t *testing.T) {
 	s := start(t)
 	s.need("GET", "/v1/ws")
@@ -442,7 +430,7 @@ func TestWSMultiConexao(t *testing.T) {
 	var wb []*wsConn
 	for range 5 {
 		w := s.ws(b.access)
-		w.ready() // em ordem: o servidor já registrou esta antes da próxima
+		w.ready() // garante a ordem: o servidor registra esta antes da próxima
 		wb = append(wb, w)
 	}
 	wb[0].expectClose(1008, 3*time.Second)
@@ -463,11 +451,10 @@ func TestWSMultiConexao(t *testing.T) {
 	wa.expect(wire.Ack, 3*time.Second)
 	live[1].ack(a, "m1")
 	eventually(s, "1º Ack apaga o envelope", func() bool { return len(pending(s, b)) == 0 })
-	live[2].ack(a, "m1") // 2º Ack de outra conexão: inofensivo
+	live[2].ack(a, "m1")
 	live[2].silent("2º Ack", quiet)
 }
 
-// Logout e reuso de refresh derrubam o WS na hora; o exp do token é a rede de segurança. api.md §6.
 func TestWSKick(t *testing.T) {
 	s := start(t)
 	s.need("GET", "/v1/ws")
@@ -506,8 +493,7 @@ func TestWSKick(t *testing.T) {
 	})
 }
 
-// Backlog maior que a fila ao vivo (64), com cliente lento: chega tudo, em ordem, sem a conexão cair. api.md §6.
-// ponytail: manda pelo WS; quando o limite de 60 msgs/min do S11 entrar, semear por SQL na tabela envelopes.
+// ponytail: manda pelo WS; quando o chat ganhar limite de mensagens por minuto, semear por SQL na tabela envelopes.
 func TestWSBacklog(t *testing.T) {
 	s := start(t)
 	s.need("GET", "/v1/ws")
@@ -521,7 +507,7 @@ func TestWSBacklog(t *testing.T) {
 		wa.envelope(b, fmt.Sprintf("m%03d", i), p)
 	}
 	for range total {
-		wa.expect(wire.Ack, 10*time.Second) // gravados
+		wa.expect(wire.Ack, 10*time.Second) // Ack S→C = gravado
 	}
 
 	wb := s.wsBuf(b.access, 0) // lento: o leitor só avança quando o teste consome
@@ -551,7 +537,7 @@ func TestWSBacklog(t *testing.T) {
 	}
 }
 
-// Redis cai no meio (spec §7): o chat e o repasse ao vivo continuam; só o GET /v1/locations fica vazio.
+// Com o Redis fora, o repasse ao vivo continua; só o GET /v1/locations fica vazio.
 func TestWSRedisCai(t *testing.T) {
 	t.Parallel()
 	_, ctl := testdb.StoppableRedis(t)

@@ -24,8 +24,7 @@ import (
 
 const (
 	redisDBs = 64
-	// Folgado: com `go test ./...` cada pacote sobe os seus containers ao mesmo tempo (e outros agentes também), e o
-	// padrão de 60 s do testcontainers estourou no Docker Desktop.
+	// O padrão de 60 s do testcontainers estoura no Docker Desktop com vários pacotes subindo containers juntos.
 	startTimeout = 3 * time.Minute
 )
 
@@ -35,7 +34,7 @@ var (
 
 	pgOnce  sync.Once
 	pgC     *postgres.PostgresContainer
-	pgURL   string // banco "tmpl": o template migrado
+	pgURL   string // do template; os testes usam clones
 	pgAdmin *pgxpool.Pool
 	pgErr   error
 	pgSeq   atomic.Int64
@@ -44,11 +43,11 @@ var (
 	rdOnce sync.Once
 	rdC    *tcredis.RedisContainer
 	rdAddr string
-	rdFree chan int // DBs lógicos livres
+	rdFree chan int
 	rdErr  error
 )
 
-// Pool devolve um pool para um banco novo, clonado do template já migrado. Fechado e apagado no fim do teste.
+// Pool devolve um banco novo, já migrado, apagado no fim do teste.
 func Pool(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	needDocker(t)
@@ -71,7 +70,7 @@ func Pool(t testing.TB) *pgxpool.Pool {
 	}
 	t.Cleanup(func() {
 		pool.Close()
-		// FORCE derruba conexões que sobraram (ex.: servidor subido pelo teste).
+		// FORCE: o servidor subido pelo teste pode ainda ter conexões abertas.
 		if _, err := pgAdmin.Exec(context.Background(), "DROP DATABASE "+name+" WITH (FORCE)"); err != nil {
 			t.Error("testdb: drop:", err)
 		}
@@ -81,7 +80,7 @@ func Pool(t testing.TB) *pgxpool.Pool {
 
 func startPostgres() {
 	ctx := context.Background()
-	pgC, pgErr = postgres.Run(ctx, "postgres:17-alpine", // o módulo já sobe com fsync=off
+	pgC, pgErr = postgres.Run(ctx, "postgres:17-alpine",
 		postgres.WithDatabase("tmpl"), postgres.WithUsername("t"), postgres.WithPassword("t"),
 		testcontainers.WithWaitStrategyAndDeadline(startTimeout,
 			wait.ForLog("database system is ready to accept connections").WithOccurrence(2).WithStartupTimeout(startTimeout)))
@@ -97,7 +96,7 @@ func startPostgres() {
 		return
 	}
 	pgErr = db.Migrate(ctx, tmpl)
-	tmpl.Close() // template não pode ter conexão aberta na hora do clone
+	tmpl.Close() // CREATE DATABASE … TEMPLATE recusa template com conexão aberta
 	if pgErr != nil {
 		return
 	}
@@ -107,14 +106,13 @@ func startPostgres() {
 func withDB(raw, name string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
-		panic(err) // a URL vem do testcontainers
+		panic(err)
 	}
 	u.Path = "/" + name
 	return u.String()
 }
 
-// Redis devolve um cliente para um DB lógico só deste teste, vazio. Pub/sub é global: canais com nome único.
-// URL para subir o binário: fmt.Sprintf("redis://%s/%d", c.Options().Addr, c.Options().DB).
+// Redis devolve um DB lógico vazio, só deste teste. Pub/sub não é por DB: canais com nome único.
 func Redis(t testing.TB) *redis.Client {
 	t.Helper()
 	needDocker(t)
@@ -150,7 +148,6 @@ func startRedis() {
 	}
 }
 
-// Sem persistência, como em produção (plano G/D1).
 func runRedis(ctx context.Context) (*tcredis.RedisContainer, error) {
 	return tcredis.Run(ctx, "redis:7-alpine",
 		testcontainers.WithCmdArgs("--databases", fmt.Sprint(redisDBs), "--save", "", "--appendonly", "no"),
@@ -160,14 +157,12 @@ func runRedis(ctx context.Context) (*tcredis.RedisContainer, error) {
 
 var errRedisStopped = errors.New("testdb: redis parado (dial recusado)")
 
-// RedisCtl derruba e religa o Redis de StoppableRedis.
 type RedisCtl struct {
 	c    *tcredis.RedisContainer
 	addr atomic.Pointer[string] // nil = parado
 }
 
-// StoppableRedis sobe um Redis só deste teste (segundos a mais) e devolve um cliente que segue o container entre
-// Stop/Start. Só para código no mesmo processo: o endereço muda a cada Start.
+// StoppableRedis: Redis só deste teste; o cliente devolvido segue o container entre Stop e Start.
 func StoppableRedis(t testing.TB) (*redis.Client, *RedisCtl) {
 	t.Helper()
 	needDocker(t)
@@ -196,11 +191,10 @@ func StoppableRedis(t testing.TB) (*redis.Client, *RedisCtl) {
 	return cl, r
 }
 
-// Stop mata o Redis na hora (SIGKILL), como uma queda: até o Start, toda conexão nova é recusada.
+// Stop mata com SIGKILL, como uma queda; até o Start, toda conexão nova é recusada.
 func (r *RedisCtl) Stop(t testing.TB) {
 	t.Helper()
-	// Esquece o endereço antes de parar: a porta liberada no host pode ir para o container de outro teste, e o cliente
-	// falaria com o Redis errado.
+	// Antes de parar: a porta liberada pode ir para o Redis de outro teste, e o cliente falaria com ele.
 	r.addr.Store(nil)
 	var now time.Duration
 	if err := r.c.Stop(context.Background(), &now); err != nil {
@@ -208,7 +202,6 @@ func (r *RedisCtl) Stop(t testing.TB) {
 	}
 }
 
-// Start religa e espera responder PING. O Redis volta vazio.
 func (r *RedisCtl) Start(t testing.TB) {
 	t.Helper()
 	ctx := context.Background()
@@ -228,8 +221,7 @@ func (r *RedisCtl) Start(t testing.TB) {
 	}
 }
 
-// Addr devolve o host:porta atual ("" parado). Para um processo de fora (ex.: o binário do servidor); ele não segue o
-// endereço novo depois do Start.
+// Addr: host:porta atual ("" parado). Um processo de fora não acompanha a porta nova depois do Start.
 func (r *RedisCtl) Addr() string {
 	if a := r.addr.Load(); a != nil {
 		return *a
@@ -246,7 +238,7 @@ func (r *RedisCtl) refresh(ctx context.Context) error {
 	return nil
 }
 
-// Main roda os testes e remove os containers compartilhados. Só faz falta com o Ryuk desligado.
+// Main remove os containers compartilhados; só faz falta com o Ryuk desligado.
 func Main(m *testing.M) {
 	code := m.Run()
 	if pgAdmin != nil {
@@ -257,7 +249,7 @@ func Main(m *testing.M) {
 	os.Exit(code)
 }
 
-// Igual a testcontainers.SkipIfProviderIsNotHealthy (que só aceita *testing.T), checado uma vez por binário.
+// testcontainers.SkipIfProviderIsNotHealthy só aceita *testing.T; esta serve a benchmarks e fuzz, e checa uma vez.
 func needDocker(t testing.TB) {
 	t.Helper()
 	dockerOnce.Do(func() {

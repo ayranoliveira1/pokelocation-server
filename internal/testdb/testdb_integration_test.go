@@ -9,7 +9,6 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/testdb"
 )
 
-// Exemplo de uso: cada teste tem banco próprio, já migrado, e não vê o do outro.
 func TestPoolIsolado(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -40,7 +39,6 @@ func TestRedisIsolado(t *testing.T) {
 	}
 }
 
-// Base do teste "Redis cai no meio" (S7): erro enquanto está fora, volta vazio e o mesmo cliente funciona.
 func TestStoppableRedis(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

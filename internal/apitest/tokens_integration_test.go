@@ -13,14 +13,12 @@ import (
 	"time"
 )
 
-// docs/api.md §2: access JWT EdDSA de 15 min. Tudo que não for assinado pela chave do servidor, com exp no futuro,
-// é 401 unauthorized.
 func TestAccessToken(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/auth/register")
 	a, b := s.register("a"), s.register("b")
 	now := time.Now().Unix()
-	// tv igual ao do token real: o middleware recusa tv ≠ users.token_version (docs/api.md §2).
+	// tv igual ao do token real: o middleware recusa tv ≠ users.token_version.
 	real := claims(t, a.access)
 	iat, tv := real["iat"], real["tv"]
 	tvN, ok := tv.(float64)
@@ -70,7 +68,6 @@ func TestAccessToken(t *testing.T) {
 	})
 }
 
-// Rotação, reuso revoga a família e derruba os access do usuário na hora (sem esperar o relógio); logout idem. docs/api.md §2.
 func TestRefresh(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/auth/refresh")
@@ -88,14 +85,13 @@ func TestRefresh(t *testing.T) {
 	}
 	s.want(s.do("GET", "/v1/me", acc1, nil), 200, "")
 
-	// Outra sessão (outro login) é outra família: o refresh dela sobrevive à revogação da primeira.
+	// Outro login é outra família: o refresh dela sobrevive à revogação da primeira.
 	l := s.do("POST", "/v1/auth/login", "", map[string]string{"email": a.email, "password": a.password})
 	s.want(l, 200, "")
 	other, accOther := l.str("refresh_token"), l.str("access_token")
 	s.secret(other, accOther)
 
-	// Reuso do refresh velho: 401, a família inteira morre (r1 também) e todo access emitido antes morre na hora, mesmo
-	// no mesmo segundo (token_version, sem janela de relógio).
+	// Reuso mata a família inteira e todo access já emitido, na hora, mesmo no mesmo segundo.
 	s.want(refresh(a.refresh), 401, "unauthorized")
 	s.check("access da família reusada", s.do("GET", "/v1/me", acc1, nil), 401, "unauthorized")
 	s.check("access da outra sessão", s.do("GET", "/v1/me", accOther, nil), 401, "unauthorized")
@@ -119,10 +115,9 @@ func TestRefresh(t *testing.T) {
 		s.want(s.do("POST", "/v1/auth/logout", "", map[string]string{"refresh_token": other}), 204, "")
 		s.check("refresh depois do logout", refresh(other), 401, "unauthorized")
 		s.check("access depois do logout", s.do("GET", "/v1/me", accOther, nil), 401, "unauthorized")
-		// Idempotente, sem Authorization (o app chama assim) e sem revelar se o token existia.
+		// O app chama sem Authorization; a resposta não revela se o token existia.
 		s.check("logout de novo", s.do("POST", "/v1/auth/logout", "", map[string]string{"refresh_token": other}), 204, "")
 		s.check("logout com lixo", s.do("POST", "/v1/auth/logout", "", map[string]string{"refresh_token": "lixo"}), 204, "")
-		// Login logo depois do logout volta a funcionar (token novo leva o token_version novo).
 		l := s.do("POST", "/v1/auth/login", "", map[string]string{"email": a.email, "password": a.password})
 		s.want(l, 200, "")
 		s.secret(l.str("access_token"), l.str("refresh_token"))
@@ -130,14 +125,14 @@ func TestRefresh(t *testing.T) {
 	})
 }
 
-// Mensagens de login não distinguem email inexistente de senha errada. docs/api.md §2.
+// Email inexistente e senha errada dão o mesmo erro: sem enumeração de contas.
 func TestLogin(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/auth/login")
 	a := s.register("a")
 	s.want(s.do("POST", "/v1/auth/login", "", map[string]string{"email": a.email, "password": "errada-123"}), 401, "invalid_credentials")
 	s.want(s.do("POST", "/v1/auth/login", "", map[string]string{"email": "ninguem@teste.dev", "password": "qualquer-123"}), 401, "invalid_credentials")
-	// Email é normalizado (trim + minúsculas): mesma conta.
+	// O servidor normaliza o email (trim + minúsculas).
 	l := s.do("POST", "/v1/auth/login", "", map[string]string{"email": " " + strings.ToUpper(a.email) + " ", "password": a.password})
 	s.want(l, 200, "")
 	s.secret(l.str("access_token"), l.str("refresh_token"))
@@ -165,8 +160,7 @@ func TestRegisterValida(t *testing.T) {
 	}
 }
 
-// 6º login no minuto → 429, por email e por IP, cada um sozinho (docs/api.md §1, spec §8). Servidor próprio: o limite
-// é em memória, por processo.
+// Servidor só deste teste: o limite é em memória, por processo.
 func TestLoginRateLimit(t *testing.T) {
 	s := start(t)
 	s.need("POST", "/v1/auth/login")
@@ -174,7 +168,7 @@ func TestLoginRateLimit(t *testing.T) {
 		return s.do("POST", "/v1/auth/login", "", map[string]string{"email": email, "password": "errada-123"})
 	}
 	t.Run("por email, IP girando", func(t *testing.T) {
-		s := s.on(t) // s.ip "" = IP novo a cada requisição: só o limite por email segura
+		s := s.on(t) // IP novo a cada requisição: só o limite por email segura
 		s.bucket("login por email", 5, 12*time.Second, time.Now(), 401, func(int) resp { return login(s, "alvo@teste.dev") })
 	})
 	t.Run("por IP, email girando", func(t *testing.T) {
@@ -186,7 +180,7 @@ func TestLoginRateLimit(t *testing.T) {
 	})
 }
 
-// forge monta um JWT. key nil = sem assinatura.
+// forge: key nil = sem assinatura.
 func forge(alg string, claims map[string]any, key ed25519.PrivateKey) string {
 	in := seg(map[string]any{"alg": alg, "typ": "JWT"}) + "." + seg(claims)
 	if key == nil {

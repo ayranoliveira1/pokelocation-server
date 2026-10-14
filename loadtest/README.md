@@ -1,4 +1,4 @@
-# Teste de carga (spec §8, plano S6/S7)
+# Teste de carga
 
 Meta: **15 mil conexões, ≤ 25 KB/conexão, p99 < 50 ms, 0 perdas** (todo envelope chega e leva `Ack`).
 
@@ -8,14 +8,13 @@ tokens com a `AUTH_SIGNING_KEY` (`tv` = 0). Depois abre N conexões WS autentica
 CPU do servidor (pelo `ps` do pid), e no fim imprime a tabela em markdown, no formato do benchmark do spike. Sai com
 código 1 se alguma meta falhar e apaga os usuários semeados (`-keep` mantém).
 
-Só com a máquina ociosa e combinado com o Ferreiro. Sem containers de teste: usa o Postgres e o Redis do compose.
+Só com a máquina ociosa. Sem containers de teste: usa o Postgres e o Redis do compose.
 
 ## Roteiro
 
 Tudo na raiz do repositório, num terminal só (as variáveis valem para os passos seguintes).
 
 ```sh
-cd /Users/ayranoliveira/Documents/Projetos/pokelocation-server
 set -a; . ./.env; set +a     # POSTGRES_PASSWORD, PG_PORT, REDIS_PORT, AUTH_SIGNING_KEY
 
 # 1. Postgres e Redis do compose (o servidor roda nativo, fora do Docker, para o -pid medir o RSS certo)

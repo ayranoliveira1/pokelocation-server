@@ -1,6 +1,5 @@
-// Package apitest: testes caixa-preta do S4 contra o binário real (cmd/server), um processo por teste, com Postgres e
-// Redis do testdb. Contrato: docs/api.md. Rota que ainda não existe → o teste é pulado (não falha), então tudo aqui
-// passa a rodar sozinho conforme S1/S2/S3 entram.
+// Package apitest: testes caixa-preta do contrato (docs/api.md) contra o binário real, um processo por teste. Rota
+// que ainda não existe pula o teste em vez de falhar.
 package apitest
 
 import (
@@ -28,8 +27,7 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/testdb"
 )
 
-// Chave do JWT (internal/auth.Config): seed Ed25519 de 32 bytes em base64 padrão. O teste guarda a chave para forjar
-// tokens (vencido, sem exp…).
+// O teste gera e guarda a chave para forjar tokens (vencido, sem exp…).
 const envJWTKey = "AUTH_SIGNING_KEY"
 
 var (
@@ -54,17 +52,16 @@ type server struct {
 	t       testing.TB
 	base    string
 	key     ed25519.PrivateKey
-	pool    *pgxpool.Pool // banco do teste, para semear o que a API não deixa criar rápido (tetos)
+	pool    *pgxpool.Pool // para semear o que os limites da API não deixam criar rápido (tetos)
 	logs    *syncBuf
 	hc      *http.Client
 	secrets *[]string
-	ip      string // X-Forwarded-For fixo; "" = um IP novo por requisição (não esbarra no limite por IP)
+	ip      string // X-Forwarded-For fixo; "" = IP novo por requisição, para não esbarrar no limite por IP
 }
 
 var ipSeq atomic.Int32
 
-// start sobe o servidor com banco e Redis só deste teste (e marca o teste como paralelo). Para no fim do teste e
-// confere que o log não vazou nada de s.secret(…).
+// start também marca o teste como paralelo e, no fim, confere que o log do servidor não vazou nenhum s.secret.
 func start(t testing.TB) *server {
 	t.Helper()
 	if tt, ok := t.(*testing.T); ok {
@@ -74,7 +71,7 @@ func start(t testing.TB) *server {
 	return startWith(t, fmt.Sprintf("redis://%s/%d", rdb.Options().Addr, rdb.Options().DB))
 }
 
-// startWith: como start, com o Redis dado (ex.: testdb.StoppableRedis). Não marca paralelo.
+// startWith: como start, com outro Redis e sem marcar paralelo.
 func startWith(t testing.TB, redisURL string) *server {
 	t.Helper()
 	pool := testdb.Pool(t)
@@ -146,14 +143,14 @@ func startWith(t testing.TB, redisURL string) *server {
 	}
 }
 
-// on devolve o mesmo servidor ligado a t (subteste): Fatal/Skip têm de ser do t da goroutine que roda.
+// on liga o servidor a um subteste: Fatal e Skip têm de vir da goroutine do próprio t.
 func (s *server) on(t *testing.T) *server {
 	c := *s
 	c.t = t
 	return &c
 }
 
-// need pula o teste se a rota ainda não existe (404 do ServeMux em texto, não o JSON not_found do contrato).
+// need: 404 em texto é do ServeMux (rota ausente), não o not_found em JSON do contrato.
 func (s *server) need(method, path string) {
 	s.t.Helper()
 	req, _ := http.NewRequest(method, s.base+path, nil)
@@ -169,8 +166,7 @@ func (s *server) need(method, path string) {
 	}
 }
 
-// secret registra valores que nunca podem aparecer no log do servidor (conferido depois de parar o processo,
-// docs/api.md §1).
+// secret: valor que nunca pode aparecer no log do servidor.
 func (s *server) secret(vals ...string) {
 	for _, v := range vals {
 		if v != "" {
@@ -189,7 +185,7 @@ type resp struct {
 func (r resp) str(k string) string { v, _ := r.body[k].(string); return v }
 func (r resp) errCode() string     { return r.str("error") }
 
-// do faz uma chamada; token "" = sem Authorization; body nil = sem corpo, string = corpo cru, outro = JSON.
+// do: body nil = sem corpo, string = corpo cru, outro = JSON.
 func (s *server) do(method, path, token string, body any) resp {
 	s.t.Helper()
 	if token != "" {
@@ -198,7 +194,6 @@ func (s *server) do(method, path, token string, body any) resp {
 	return s.send(method, path, token, body)
 }
 
-// doHeader manda o Authorization exatamente como dado.
 func (s *server) doHeader(method, path, auth string) resp {
 	s.t.Helper()
 	return s.send(method, path, auth, nil)
@@ -216,7 +211,7 @@ func (s *server) send(method, path, auth string, body any) resp {
 	return out
 }
 
-// raw: pode rodar fora da goroutine do teste (só devolve erro).
+// raw só devolve erro: pode rodar fora da goroutine do teste.
 func (s *server) raw(method, path, auth string, body any) (resp, error) {
 	var rd io.Reader
 	switch b := body.(type) {
@@ -240,7 +235,7 @@ func (s *server) raw(method, path, auth string, body any) (resp, error) {
 	if auth != "" {
 		req.Header.Set("Authorization", auth)
 	}
-	// O auth lê o IP do último X-Forwarded-For quando a conexão vem de loopback (como atrás do Caddy).
+	// Vindo de loopback, o auth usa o último X-Forwarded-For como IP do cliente (como atrás do Caddy).
 	ip := s.ip
 	if ip == "" {
 		n := ipSeq.Add(1)
@@ -260,7 +255,6 @@ func (s *server) raw(method, path, auth string, body any) (resp, error) {
 	return out, nil
 }
 
-// want falha (e para) se o status e, para erro, o código não batem com o contrato. Para passos de preparo.
 func (s *server) want(r resp, status int, code string) {
 	s.t.Helper()
 	if !s.match(r, status, code) {
@@ -268,7 +262,7 @@ func (s *server) want(r resp, status int, code string) {
 	}
 }
 
-// check é o want que não para: cada célula da matriz é reportada.
+// check, ao contrário de want, não para o teste: cada célula da matriz é reportada.
 func (s *server) check(what string, r resp, status int, code string) bool {
 	s.t.Helper()
 	if !s.match(r, status, code) {
@@ -284,7 +278,7 @@ func (s *server) match(r resp, status int, code string) bool {
 
 type user struct{ id, email, password, code, access, refresh string }
 
-// register cria a conta e lê /v1/me. Conta no limite de 5/min por email (o de IP gira, ver server.ip).
+// register conta no limite de 5/min por email.
 func (s *server) register(name string) user {
 	s.t.Helper()
 	u := user{email: name + "@teste.dev", password: "senha-" + rand.Text()}
@@ -298,10 +292,8 @@ func (s *server) register(name string) user {
 	return u
 }
 
-// bucket confere um limite token bucket (N por minuto = capacidade N, repõe 1 a cada every) sem supor janela fixa:
-// chama call até vir 429 e exige que tenham passado pelo menos budget e no máximo budget + créditos repostos desde since
-// (quando o balde estava com budget). Toda resposta antes do 429 tem de ser ok. Sob carga (-race, todos os pacotes) as
-// chamadas podem levar mais que every, e o crédito reposto é correto.
+// bucket confere um limite token bucket sem supor janela fixa: sob carga as chamadas levam mais que every e o
+// servidor repõe créditos, então antes do 429 passam de budget a budget + créditos repostos desde since.
 func (s *server) bucket(what string, budget int, every time.Duration, since time.Time, ok int, call func(i int) resp) {
 	s.t.Helper()
 	for i := 0; i < budget+30; i++ {
