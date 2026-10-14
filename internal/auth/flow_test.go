@@ -74,7 +74,6 @@ func (e *env) post(path, body string) *httptest.ResponseRecorder {
 
 var nameSeq atomic.Int32
 
-// cred: com um @nome novo a cada chamada (o cadastro exige; o login ignora).
 func cred(email, pw string) string {
 	return credName(email, pw, fmt.Sprintf("user%d", nameSeq.Add(1)))
 }
@@ -546,7 +545,6 @@ func TestCleanup(t *testing.T) {
 	}
 }
 
-// ParseAccess não lê o banco: a versão volta para quem chama comparar com token_version (o WS, depois do register).
 func TestParseAccess(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -789,7 +787,6 @@ func TestHooks(t *testing.T) {
 	}
 }
 
-// Banco travado: o handler desiste no prazo dele em vez de segurar a requisição.
 func TestRequestDeadline(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -833,7 +830,6 @@ func TestCleanupBatches(t *testing.T) {
 	}
 }
 
-// Logout e reuso de refresh apagam o token FCM: o aparelho não recebe ping da conta que saiu.
 func TestRevocationClearsFCM(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -873,7 +869,6 @@ func TestRevocationClearsFCM(t *testing.T) {
 	}
 }
 
-// Vínculo Google tira a conta de todos os grupos (o invasor não fica nos grupos do dono real nem o contrário).
 func TestLinkLeavesGroups(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -929,8 +924,6 @@ func TestLinkLeavesGroups(t *testing.T) {
 		t.Errorf("aviso de %s: %v", alone, got[alone])
 	}
 }
-
-// ---- @nome (§8) ----
 
 func TestRegisterUsername(t *testing.T) {
 	t.Parallel()
@@ -997,7 +990,6 @@ func TestPutUsername(t *testing.T) {
 	wantErr(t, e.req("PUT", "/v1/me/username", `{"username":"zeta"}`, ""), 401, "unauthorized")
 }
 
-// AuthedNamed: o Authed mais o @nome, na mesma leitura por PK; as rotas de amigos, chat etc. passam por ele.
 func TestAuthedNamed(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

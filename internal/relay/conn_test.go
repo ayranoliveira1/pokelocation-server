@@ -110,7 +110,6 @@ func TestFriendSet(t *testing.T) {
 	}
 }
 
-// readyConn: conexão pronta sem socket; write grava o que o escritor sob demanda escreveria.
 func readyConn(h *Hub, user string, write func([]byte) error) *Conn {
 	c := fakeConn(h, user)
 	c.write = write
@@ -130,7 +129,6 @@ func waitIdle(c *Conn) {
 	}
 }
 
-// O escritor sobe e termina a cada rajada; o item que chega enquanto ele termina não pode se perder nem inverter.
 func TestOnDemandWriterOrder(t *testing.T) {
 	var mu sync.Mutex
 	var got []string

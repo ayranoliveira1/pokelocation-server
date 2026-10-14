@@ -32,9 +32,9 @@ const (
 	pageSize   = 50
 	pageBytes  = 48 << 10 // o app lê no máximo 64 KiB por resposta
 	maxAckIDs  = 100
-	// maxFriendsRead: teto de 500 amigos do friends, com folga; dado fora da regra não vira lista sem fim.
+	// teto de 500 amigos do friends, com folga
 	maxFriendsRead = 1000
-	// maxGroupContacts: 25 grupos × 49 outros membros, com folga.
+	// 25 grupos × 49 outros membros, com folga
 	maxGroupContacts = 1300
 	chatPerMin       = 60 // Envelope + GroupEnvelope; um de grupo conta 1
 	pingEvery        = 30 * time.Second
@@ -59,7 +59,7 @@ type Hub struct {
 	cl             *cluster // nil = uma instância só (EnableCluster liga)
 	chat           *ratelimit.Limiter
 
-	// Notify: envelope gravado para quem não tem conexão nesta instância (o main liga no push). nil = desligado.
+	// Notify: envelope gravado para quem não está conectado nesta instância. nil = desligado.
 	Notify func(user string)
 }
 
@@ -70,7 +70,7 @@ type shard struct {
 
 // user: conexões em ordem de chegada. reload serializa as recargas da lista (ler o banco e gravar sob a trava): a
 // última gravada é sempre a lida por último.
-// friends recebe a posição; contacts (amigos e membros de grupos em comum, sem bloqueio) pode receber Envelope 1:1.
+// Posição só para friends; contacts (amigos e membros de grupo em comum, sem bloqueio) pode receber Envelope 1:1.
 type user struct {
 	conns    []*Conn
 	friends  atomic.Pointer[friendSet]
@@ -78,7 +78,7 @@ type user struct {
 	reload   sync.Mutex
 }
 
-// setCircle: chamar com u.reload. Sem grupo em comum, contacts é a própria lista de amigos.
+// setCircle: chamar com u.reload.
 func (u *user) setCircle(friends, coMembers []string) {
 	fs := newFriendSet(friends)
 	cs := fs
@@ -89,8 +89,7 @@ func (u *user) setCircle(friends, coMembers []string) {
 	u.contacts.Store(cs)
 }
 
-// friendSet: imutável (o ReloadFriends troca o conjunto inteiro). UUIDs canônicos de 36 bytes, ordenados, num blob
-// só: 36 B por amigo, sem map nem cabeçalho de slice. Busca binária no Envelope; a posição só itera.
+// friendSet: imutável; UUIDs de 36 B ordenados num blob só (sem map nem cabeçalho de slice por amigo).
 type friendSet struct {
 	blob []byte
 }
@@ -125,8 +124,6 @@ func (fs *friendSet) has(peer []byte) bool {
 	return lo < fs.len() && bytes.Equal(fs.id(lo), peer)
 }
 
-// New: parse é o auth.Handler.ParseAccess (sem banco; a versão é conferida na consulta do Auth). onLocation recebe os
-// frames Location e LocationOff do cliente.
 func New(pool *pgxpool.Pool, parse func(token string) (string, time.Time, int, error),
 	onLocation func(c *Conn, f wire.Frame)) *Hub {
 	h := &Hub{store: &Store{pool: pool}, parse: parse, onLocation: onLocation, authWait: 5 * time.Second, dbWait: dbWait,
@@ -268,7 +265,6 @@ func (h *Hub) relayEnvelope(from *Conn, f wire.Frame, fresh bool) {
 	h.notifyOffline(f.Peer)
 }
 
-// relayGroup: Ack{to = grupo} ao remetente e um frame só, compartilhado, para as cópias novas.
 func (h *Hub) relayGroup(from *Conn, f wire.Frame, recipients []string) {
 	ack := getOut()
 	ack.b = wire.AppendAck(ack.b, f.Group, f.MsgID)
@@ -302,8 +298,7 @@ func (h *Hub) notifyOffline(user []byte) {
 	}
 }
 
-// GroupChanged recarrega os contatos de users (quem entrou pode receber a SKDM 1:1 já) e só depois avisa com o
-// frame 9, pelo deliver (atravessa o cluster).
+// Recarrega antes de avisar: quem entrou já pode receber a SKDM 1:1 quando o app reagir ao frame 9.
 func (h *Hub) GroupChanged(groupID string, users []string) {
 	for _, u := range users {
 		h.ReloadFriends(u)
@@ -381,8 +376,6 @@ var (
 	errNoName  = errors.New("relay: conta sem @nome")
 )
 
-// session: a consulta única do Auth, depois do register e sob u.reload (como o reload). Recusa o token se a versão
-// dele não é a atual; devolve o corte do backlog.
 func (h *Hub) session(u *user, id string, version int) (int64, error) {
 	u.reload.Lock()
 	defer u.reload.Unlock()

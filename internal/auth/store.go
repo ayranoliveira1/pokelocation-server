@@ -62,7 +62,6 @@ func uniqueViolation(err error, constraint string) bool {
 	return errors.As(err, &pg) && pg.Code == "23505" && pg.ConstraintName == constraint
 }
 
-// createUser: nil = NULL. Email e @nome únicos no mesmo INSERT.
 func (s *Store) createUser(ctx context.Context, email, hash, sub, username *string) (string, error) {
 	var id string
 	var err error
@@ -101,7 +100,6 @@ func (s *Store) userBySub(ctx context.Context, sub string) (string, error) {
 }
 
 // version: id que nem é uuid também é errNotFound (o sub vem do token, não do banco).
-// version: a leitura por PK de toda requisição autenticada; named (tem @nome) vem junto, sem consulta a mais.
 func (s *Store) version(ctx context.Context, id string) (v int, named bool, err error) {
 	err = s.pool.QueryRow(ctx, qVersion, id).Scan(&v, &named)
 	var pg *pgconn.PgError
@@ -119,7 +117,6 @@ func (s *Store) version(ctx context.Context, id string) (v int, named bool, err 
 // ponytail: idem para um login do invasor com a senha velha que passa no argon2 logo antes do vínculo e grava a família
 // logo depois (login tem 5/min por email). Se virar caso real: no login, gravar o refresh com
 // INSERT … SELECT … FROM users WHERE id = $1 AND password_hash = $2 FOR NO KEY UPDATE (0 linhas → invalid_credentials).
-// Também tira a conta de todos os grupos (as mudanças voltam para o aviso depois do commit).
 func (s *Store) linkGoogle(ctx context.Context, id, sub string) (bool, []string, []groups.Change, error) {
 	ok := false
 	var ex []string
@@ -276,13 +273,12 @@ const (
 	batchWait    = 5 * time.Second
 )
 
-// cleanup em lotes curtos, cada um com prazo próprio: um DELETE único passaria do statement_timeout com muitos
-// vencidos. Os usados ficam até vencer, porque é com eles que o reuso é detectado.
+// Em lotes com prazo próprio: um DELETE único passaria do statement_timeout. Os usados ficam até vencer, porque é
+// com eles que o reuso é detectado.
 func (s *Store) cleanup(ctx context.Context, now time.Time) error {
 	for {
 		bctx, cancel := context.WithTimeout(ctx, batchWait)
-		// ORDER BY faz o lote andar pelo índice de expires_at, e o ANY(ARRAY) apaga pela PK: sem isso, cada lote relia a
-		// tabela desde o começo.
+		// ORDER BY anda pelo índice de expires_at e o ANY(ARRAY) apaga pela PK; sem eles cada lote relê a tabela.
 		tag, err := s.pool.Exec(bctx, qCleanup, now, cleanupBatch)
 		cancel()
 		if err != nil || tag.RowsAffected() < cleanupBatch {

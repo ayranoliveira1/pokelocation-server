@@ -1,4 +1,4 @@
-// Package push: aviso "nova mensagem" pelo FCM, sem conteúdo, para quem não está conectado (docs/api.md §7, S10).
+// Package push: aviso de nova mensagem pelo FCM, sem conteúdo.
 package push
 
 import (

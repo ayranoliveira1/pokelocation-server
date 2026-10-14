@@ -61,14 +61,12 @@ type queuedEnvelope struct {
 	Payload     []byte  `json:"payload"`
 }
 
-// circle: amigos (o bloqueio apaga a amizade, então aceita já é sem bloqueio) e membros de grupos em comum sem
-// bloqueio (contatos para o Envelope 1:1).
+// O bloqueio apaga a amizade: aceita já é sem bloqueio.
 func (s *Store) circle(ctx context.Context, user string) (friends, coMembers []string, err error) {
 	err = s.pool.QueryRow(ctx, qCircle, user, maxFriendsRead, maxGroupContacts).Scan(&friends, &coMembers)
 	return friends, coMembers, err
 }
 
-// groupSend: member false = não é membro (nada gravado); recipients = só as cópias novas (reenvio não reentrega).
 func (s *Store) groupSend(ctx context.Context, group, from, msgID string, payload []byte) (member bool,
 	recipients []string, err error) {
 	err = s.pool.QueryRow(ctx, qGroupSend, group, from, msgID, payload).Scan(&member, &recipients)
@@ -94,7 +92,6 @@ func (s *Store) ackIDs(ctx context.Context, recipient string, ids []int64) error
 
 var errNoUser = errors.New("relay: usuário não existe")
 
-// session lê, num snapshot só, a versão dos tokens, o corte do backlog e os amigos (o Auth do WS).
 func (s *Store) session(ctx context.Context, user string) (version int, named bool, cutoff int64, friends,
 	coMembers []string, err error) {
 	err = s.pool.QueryRow(ctx, qSession, user, maxFriendsRead, maxGroupContacts).Scan(&version, &named, &cutoff,
@@ -114,12 +111,11 @@ func (s *Store) page(ctx context.Context, recipient string, after, upTo int64, l
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[queuedEnvelope])
 }
 
-// cleanup em lotes curtos, cada um com prazo próprio: um DELETE único passaria do statement_timeout com a fila grande.
+// Em lotes com prazo próprio: um DELETE único passaria do statement_timeout.
 func (s *Store) cleanup(ctx context.Context) error {
 	for {
 		bctx, cancel := context.WithTimeout(ctx, batchWait)
-		// ORDER BY faz o lote andar pelo índice de created_at, e o ANY(ARRAY) apaga pela PK: sem isso, cada lote relia a
-		// tabela desde o começo.
+		// ORDER BY anda pelo índice de created_at e o ANY(ARRAY) apaga pela PK; sem eles cada lote relê a tabela.
 		tag, err := s.pool.Exec(bctx, qCleanup, cleanupBatch)
 		cancel()
 		if err != nil || tag.RowsAffected() < cleanupBatch {

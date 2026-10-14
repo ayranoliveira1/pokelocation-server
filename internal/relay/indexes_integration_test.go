@@ -16,7 +16,6 @@ func TestIndices(t *testing.T) {
 
 func TestIndicesSeed(t *testing.T) { checkIndices(t, testdb.Seed(t)) }
 
-// Toda query do store em tabela grande, pela constante que o store usa (o INSERT não tem plano a conferir).
 func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 	s := testdb.SampleOf(t, pool)
 	circle := []any{s.User, maxFriendsRead, maxGroupContacts}

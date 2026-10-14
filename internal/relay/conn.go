@@ -58,7 +58,6 @@ type item struct {
 	drop bool // posição
 }
 
-// queue: no máximo um escritor por vez e só depois do Auth aprovado.
 type queue struct {
 	mu        sync.Mutex
 	items     [queueCap]item
@@ -83,7 +82,7 @@ func (q *queue) add(ob *outBuf, drop bool) {
 	q.n++
 }
 
-// claim: chamar com mu. true = quem chamou sobe o escritor.
+// claim: chamar com q.mu.
 func (q *queue) claim() bool {
 	if q.ready && !q.running {
 		q.running = true
@@ -128,7 +127,6 @@ func (q *queue) pop() (item, bool) {
 	return it, false
 }
 
-// Conn: uma goroutine de leitura (readLoop); o escritor (flush) só existe enquanto há o que escrever.
 type Conn struct {
 	hub   *Hub
 	ws    *websocket.Conn
@@ -137,7 +135,7 @@ type Conn struct {
 	u     *user
 	q     queue
 	write func([]byte) error // campo para o teste medir o escritor sem socket
-	// flushFn: method value criado uma vez; "go c.flush()" alocaria um closure a cada subida do escritor.
+	// method value criado uma vez: "go c.flush()" alocaria um closure a cada subida do escritor.
 	flushFn func()
 	ping    *time.Timer
 	done    chan struct{} // fecha quando o socket fecha
@@ -159,7 +157,6 @@ func (c *Conn) setUser(id string) {
 	c.userB = []byte(id)
 }
 
-// friend: pode receber Envelope 1:1 (amigo ou membro de grupo em comum, sem bloqueio).
 func (c *Conn) friend(peer []byte) bool {
 	fs := c.u.contacts.Load()
 	if fs == nil {
@@ -168,8 +165,6 @@ func (c *Conn) friend(peer []byte) bool {
 	return fs.has(peer)
 }
 
-// push: a referência passa à fila. Cheia, tira a posição mais velha; só com envelopes, uma posição nova é descartada
-// e um envelope novo devolve false (quem chama fecha a conexão: o envelope segue no Postgres).
 func (c *Conn) push(ob *outBuf, drop bool) bool {
 	q := &c.q
 	q.mu.Lock()
@@ -192,7 +187,6 @@ func (c *Conn) push(ob *outBuf, drop bool) bool {
 	return true
 }
 
-// pushWait: contrapressão do backlog. false = conexão fechando.
 func (c *Conn) pushWait(ob *outBuf) bool {
 	q := &c.q
 	for {
@@ -221,7 +215,6 @@ func (c *Conn) pushWait(ob *outBuf) bool {
 	}
 }
 
-// setReady libera a escrita depois do Auth aprovado; o que chegou durante o Auth sai agora.
 func (c *Conn) setReady() {
 	c.q.mu.Lock()
 	c.q.ready = true
@@ -232,8 +225,7 @@ func (c *Conn) setReady() {
 	}
 }
 
-// kill: o primeiro vale. Não bloqueia: o escritor (o que está rodando ou um novo) manda o Error e o close e fecha o
-// socket. code 0 = só fecha.
+// kill: o primeiro vale; não bloqueia (quem escreve o close e fecha o socket é o escritor).
 func (c *Conn) kill(code int, errCode string) {
 	q := &c.q
 	q.mu.Lock()
@@ -264,7 +256,6 @@ func (c *Conn) sendError(code string) {
 	}
 }
 
-// flush escreve até esvaziar a fila e termina; no kill, fecha o socket. running garante um por vez.
 func (c *Conn) flush() {
 	for {
 		it, closing := c.q.pop()
@@ -288,7 +279,7 @@ func (c *Conn) writeWS(b []byte) error {
 	return c.ws.WriteMessage(websocket.BinaryMessage, b)
 }
 
-// sendPing: WriteControl pode correr junto com o escritor (gorilla).
+// WriteControl pode correr junto com o escritor (gorilla).
 func (c *Conn) sendPing() {
 	if c.ws == nil {
 		return
@@ -417,8 +408,8 @@ func (c *Conn) auth() bool {
 	if h.cl != nil { // cluster: o que outra instância publicar daqui em diante já chega a esta conexão
 		h.cl.wait(id, subWait)
 	}
-	// Versão do token, corte do backlog e amigos lidos depois do register: um Kick ou ReloadFriends que comitou antes
-	// dele não acharia esta conexão, e o que for gravado depois do corte já sai ao vivo (sem o corte, sairia em dobro).
+	// Lidos depois do register: um Kick ou ReloadFriends anterior não acharia esta conexão. O corte do backlog evita
+	// mandar em dobro o que já sai ao vivo.
 	cutoff, err := h.session(c.u, id, version)
 	if errors.Is(err, errRevoked) {
 		c.kill(websocket.ClosePolicyViolation, "unauthorized")

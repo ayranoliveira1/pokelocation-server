@@ -66,8 +66,6 @@ func BenchmarkRelayEnvelope(b *testing.B) {
 	}
 }
 
-// Escritor sob demanda: enfileirar numa conexão pronta e ociosa sobe uma goroutine (pilha do cache do runtime) que
-// escreve e termina. Mede o repasse inteiro, inclusive essa subida.
 func TestZeroAllocsOnDemandWriter(t *testing.T) {
 	h := New(nil, nil, nil)
 	const a, b = "0b9f8c56-0d7e-4c1f-9a39-3c0d1e8e7a11", "1c0f9d67-1e8f-4d20-8b4a-4d1e2f9f8b22"

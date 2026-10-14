@@ -166,7 +166,6 @@ func TestNotify(t *testing.T) {
 	}
 }
 
-// Rajada para o mesmo usuário vira um aviso (o app busca a fila inteira de uma vez).
 func TestNotifyCoalesces(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Pool(t)
@@ -189,7 +188,6 @@ func TestNotifyCoalesces(t *testing.T) {
 	}
 }
 
-// O envio falso (sem credencial) loga só o usuário: nunca o token.
 func TestLogSenderNoToken(t *testing.T) {
 	var buf bytes.Buffer
 	old := slog.Default()
@@ -214,7 +212,6 @@ func TestNewSenderBadCredentials(t *testing.T) {
 	}
 }
 
-// Um token é de um aparelho só: registrar o mesmo token em outra conta tira da anterior (troca de conta no celular).
 func TestTokenUnique(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Pool(t)
@@ -235,7 +232,6 @@ func TestTokenUnique(t *testing.T) {
 	}
 }
 
-// O aviso acompanha a carga: 1000 pendentes com FCM de 50 ms não podem levar 50 s em série.
 func TestNotifyThroughput(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Pool(t)

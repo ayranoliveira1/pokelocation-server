@@ -21,15 +21,12 @@ const (
 	workers    = 16  // envios ao FCM em paralelo: cada um é uma ida HTTP de dezenas de ms
 )
 
-// ErrInvalidToken: o FCM recusou o token (app desinstalado, token trocado); o token é apagado.
 var ErrInvalidToken = errors.New("push: token inválido")
 
-// Sender manda o aviso, sem conteúdo. Interface para o FCM real só entrar com credencial (falso nos testes e no local).
 type Sender interface {
 	Send(ctx context.Context, user, token string) error
 }
 
-// Service junta os avisos por usuário e manda numa goroutine própria: quem chama Notify (o relay) nunca espera rede.
 type Service struct {
 	store   *Store
 	sender  Sender
@@ -42,7 +39,6 @@ func New(pool *pgxpool.Pool, sender Sender) *Service {
 	return &Service{store: &Store{pool: pool}, sender: sender, pending: map[string]struct{}{}, wake: make(chan struct{}, 1)}
 }
 
-// Notify não bloqueia; rajadas para o mesmo usuário viram um aviso (o app busca a fila inteira).
 func (s *Service) Notify(user string) {
 	s.mu.Lock()
 	if len(s.pending) < maxPending {
@@ -55,7 +51,6 @@ func (s *Service) Notify(user string) {
 	}
 }
 
-// Run manda os avisos até ctx acabar (o main roda numa goroutine).
 func (s *Service) Run(ctx context.Context) {
 	for {
 		select {
@@ -118,7 +113,7 @@ func (s *Service) send(ctx context.Context, t target) {
 	}
 }
 
-// logSender: sem credencial (testes, local). Uma linha por aviso, só com o usuário (o api.md §1 deixa logar o id).
+// logSender loga só o usuário, nunca o token.
 type logSender struct{}
 
 func (logSender) Send(_ context.Context, user, _ string) error {

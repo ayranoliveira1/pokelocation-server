@@ -35,7 +35,6 @@ type env struct {
 
 var codeSeq atomic.Int32
 
-// Token de teste = id do usuário, sempre com tv 0; o que não for uuid → ErrUnauthorized.
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	t.Parallel()
@@ -669,7 +668,6 @@ func TestRESTDeadline(t *testing.T) {
 	}
 }
 
-// LIMIT defensivo: a lista em memória nunca passa de maxFriendsRead, mesmo com dado fora da regra do friends.
 func TestFriendsLimit(t *testing.T) {
 	e := newEnv(t)
 	a := e.user()
@@ -686,7 +684,6 @@ func TestFriendsLimit(t *testing.T) {
 	}
 }
 
-// Token com tv antigo (logout, reuso de refresh ou vínculo comitado antes do Auth): recusado na consulta do Auth.
 func TestRevokedTokenVersion(t *testing.T) {
 	e := newEnv(t)
 	a := e.user()
@@ -716,8 +713,6 @@ func TestCleanupBatches(t *testing.T) {
 	}
 }
 
-// Token revogado (tv velho) entra no registro antes da consulta de versão: o que chegar para ele nesse meio não pode
-// sair para o socket; só o Error{unauthorized} e o close.
 func TestRevokedSeesNothing(t *testing.T) {
 	e := newEnv(t)
 	a, b := e.user(), e.user()
@@ -738,7 +733,6 @@ func TestRevokedSeesNothing(t *testing.T) {
 	c.wantClose(websocket.ClosePolicyViolation)
 }
 
-// relayGoroutines conta, pelo stack, só as goroutines das conexões do relay (o resto do processo não interessa).
 func relayGoroutines() (readers, writers, backlogs int) {
 	buf := make([]byte, 1<<20)
 	for {
@@ -763,8 +757,7 @@ func relayGoroutines() (readers, writers, backlogs int) {
 	return readers, writers, backlogs
 }
 
-// Conexão ociosa: só a goroutine de leitura; nenhum escritor nem backlog sobra depois de esvaziar a fila. Sem t.Parallel: as
-// conexões de outros testes também têm readLoop.
+// Sem t.Parallel: as conexões de outros testes também têm readLoop.
 func TestIdleConnGoroutines(t *testing.T) {
 	e := newEnvPool(t, testdb.Pool(t))
 	const n = 50
@@ -779,8 +772,6 @@ func TestIdleConnGoroutines(t *testing.T) {
 	}
 	t.Fatalf("%d leitores, %d escritores e %d backlogs para %d conexões ociosas", r, w, b, n)
 }
-
-// ---- grupos (§7), contatos, limite de chat e push ----
 
 func (e *env) group(members ...string) string {
 	e.t.Helper()
@@ -863,7 +854,6 @@ func TestGroupEnvelope(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// backlog e REST levam o group_id
 	cOff := e.online(off)
 	if f := cOff.read(); f.Type != wire.GroupEnvelope || string(f.Group) != g || string(f.Peer) != a {
 		t.Fatalf("backlog: %+v", f)
@@ -876,7 +866,6 @@ func TestGroupEnvelope(t *testing.T) {
 	}
 }
 
-// Membros de grupo em comum podem mandar Envelope 1:1 (a SKDM vai assim); bloqueio corta; sair do grupo corta.
 func TestGroupContacts(t *testing.T) {
 	e := newEnv(t)
 	a, b, c := e.user(), e.user(), e.user()
@@ -956,7 +945,6 @@ func TestPushOnlyOffline(t *testing.T) {
 	}
 }
 
-// Conta sem @nome (1º login Google) não abre o WS: o app pede o nome antes (§8).
 func TestUsernameRequired(t *testing.T) {
 	e := newEnv(t)
 	a := e.user()

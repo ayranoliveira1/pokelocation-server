@@ -104,8 +104,7 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 // Cleanup apaga os refresh tokens vencidos.
 func (h *Handler) Cleanup(ctx context.Context) error { return h.svc.store.cleanup(ctx, h.svc.now()) }
 
-// ParseAccess valida o access token sem ir ao banco (ErrUnauthorized se inválido ou vencido). Quem chama tem de
-// comparar version com users.token_version: só assim a revogação vale.
+// ParseAccess não consulta o banco: quem chama tem de comparar version com users.token_version, senão a revogação não vale.
 func (h *Handler) ParseAccess(token string) (userID string, exp time.Time, version int, err error) {
 	return h.svc.parse(token)
 }
@@ -113,8 +112,6 @@ func (h *Handler) ParseAccess(token string) (userID string, exp time.Time, versi
 // Authed exige um Bearer válido e põe o id do usuário no contexto (httpx.User).
 func (h *Handler) Authed(next http.HandlerFunc) http.Handler { return h.authed(false, next) }
 
-// AuthedNamed: o Authed mais o @nome (403 username_required sem ele), na mesma leitura por PK. Para amigos, chaves,
-// grupos, fila, posições e FCM; as rotas do próprio auth ficam com o Authed.
 func (h *Handler) AuthedNamed(next http.HandlerFunc) http.Handler { return h.authed(true, next) }
 
 func (h *Handler) authed(needName bool, next http.HandlerFunc) http.Handler {

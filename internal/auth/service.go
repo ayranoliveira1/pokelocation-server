@@ -90,7 +90,6 @@ type Service struct {
 	dummy  string        // login sem conta compara com este hash: o tempo de resposta não revela se o email existe
 	argon  chan struct{} // 19 MiB por hash: o teto de hashes simultâneos impede uma rajada de logins de estourar a RAM
 	notify func(user string, exFriends []string, groupChanges []groups.Change)
-	// names: trocas de @nome, 5 por dia.
 	// ponytail: em memória e por instância; um restart ou outra instância zera a contagem do dia. Contar no banco
 	// (ex.: users.username_changed_at + contagem) se aparecer abuso.
 	names *ratelimit.Limiter
@@ -195,7 +194,6 @@ func (s *Service) accessToken(userID string, tv int) (string, error) {
 	}, &tv}).SignedString(s.key)
 }
 
-// parse não lê o banco: a revogação (tv ≠ token_version) fica para quem chama.
 func (s *Service) parse(token string) (string, time.Time, int, error) {
 	var c claims
 	_, err := jwt.ParseWithClaims(token, &c, func(*jwt.Token) (any, error) { return s.key.Public(), nil },
@@ -232,8 +230,7 @@ func checkName(raw string) (string, error) {
 	return name, nil
 }
 
-// setUsername: o nome atual de novo não conta no limite; os outros contam antes de gravar (inclusive um já usado,
-// para ninguém varrer nomes trocando o próprio).
+// Conta antes de gravar, inclusive o nome já usado: senão dá para varrer nomes trocando o próprio.
 func (s *Service) setUsername(ctx context.Context, user, raw string) error {
 	name, err := checkName(raw)
 	if err != nil {
