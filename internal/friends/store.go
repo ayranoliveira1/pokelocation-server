@@ -19,9 +19,49 @@ const lockPair = `SELECT pg_advisory_xact_lock(hashtextextended(least($1::uuid, 
 
 const pairIs = `least(requester_id, addressee_id) = least($1::uuid, $2::uuid) AND greatest(requester_id, addressee_id) = greatest($1::uuid, $2::uuid)`
 
+// Queries com o plano conferido em indexes_integration_test.go.
+const (
+	qUserByCode   = `SELECT id FROM users WHERE friend_code = $1`
+	qBlockBetween = `SELECT blocker_id = $1 FROM blocks
+			WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
+			ORDER BY blocker_id = $1 DESC LIMIT 1`
+	qPairForUpdate = `SELECT id, status, requester_id = $1 FROM friendships WHERE ` + pairIs + ` FOR UPDATE`
+	qPendingCounts = `SELECT
+			count(*) FILTER (WHERE requester_id = $1),
+			count(*) FILTER (WHERE addressee_id = $2)
+			FROM friendships WHERE status = 'pending' AND (requester_id = $1 OR addressee_id = $2)`
+	qInsertRequest = `INSERT INTO friendships (requester_id, addressee_id, status)
+			VALUES ($1, $2, 'pending') RETURNING id`
+	qAccept       = `UPDATE friendships SET status = 'accepted' WHERE id = $1`
+	qFriendsCount = `SELECT
+		count(*) FILTER (WHERE requester_id = $1 OR addressee_id = $1),
+		count(*) FILTER (WHERE requester_id = $2 OR addressee_id = $2)
+		FROM friendships WHERE status = 'accepted' AND (requester_id IN ($1, $2) OR addressee_id IN ($1, $2))`
+	qPendingTo = `SELECT requester_id FROM friendships
+			WHERE id = $1 AND addressee_id = $2 AND status = 'pending'`
+	qPendingToForUpdate = `SELECT requester_id FROM friendships
+			WHERE id = $1 AND addressee_id = $2 AND status = 'pending' FOR UPDATE`
+	qDecline = `DELETE FROM friendships
+		WHERE id = $1 AND status = 'pending' AND (requester_id = $2 OR addressee_id = $2)`
+	qDeletePair = `WITH d AS (DELETE FROM friendships WHERE ` + pairIs + ` RETURNING status)
+		SELECT EXISTS (SELECT 1 FROM d WHERE status = 'accepted')`
+	qBlock = `INSERT INTO blocks (blocker_id, blocked_id)
+			SELECT $1, id FROM users WHERE id = $2 ON CONFLICT DO NOTHING`
+	qUserExists          = `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`
+	qDeleteEnvelopesPair = `DELETE FROM envelopes WHERE (recipient_id = $1 AND sender_id = $2)
+			OR (recipient_id = $2 AND sender_id = $1)`
+	qUnblock = `DELETE FROM blocks WHERE blocker_id = $1 AND blocked_id = $2`
+	qList    = `SELECT f.id, f.status, f.requester_id = $1, u.id, u.friend_code, f.created_at
+		FROM friendships f
+		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
+		WHERE f.requester_id = $1 OR f.addressee_id = $1
+		ORDER BY f.created_at, f.id
+		LIMIT $2`
+)
+
 func (s *Store) userByCode(ctx context.Context, code string) (string, error) {
 	var id string
-	err := s.pool.QueryRow(ctx, `SELECT id FROM users WHERE friend_code = $1`, code).Scan(&id)
+	err := s.pool.QueryRow(ctx, qUserByCode, code).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrCodeNotFound
 	}
@@ -34,9 +74,7 @@ func (s *Store) request(ctx context.Context, me, to string) (id, status string, 
 			return err
 		}
 		var mine bool // me bloqueou to: tem prioridade (403 blocked)
-		err := tx.QueryRow(ctx, `SELECT blocker_id = $1 FROM blocks
-			WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
-			ORDER BY blocker_id = $1 DESC LIMIT 1`, me, to).Scan(&mine)
+		err := tx.QueryRow(ctx, qBlockBetween, me, to).Scan(&mine)
 		switch {
 		case err == nil && mine:
 			return ErrBlocked
@@ -47,7 +85,7 @@ func (s *Store) request(ctx context.Context, me, to string) (id, status string, 
 		}
 
 		var fromMe bool
-		err = tx.QueryRow(ctx, `SELECT id, status, requester_id = $1 FROM friendships WHERE `+pairIs+` FOR UPDATE`,
+		err = tx.QueryRow(ctx, qPairForUpdate,
 			me, to).Scan(&id, &status, &fromMe)
 		switch {
 		case err == nil && status == "accepted":
@@ -62,10 +100,7 @@ func (s *Store) request(ctx context.Context, me, to string) (id, status string, 
 		}
 
 		var out, in int
-		if err := tx.QueryRow(ctx, `SELECT
-			count(*) FILTER (WHERE requester_id = $1),
-			count(*) FILTER (WHERE addressee_id = $2)
-			FROM friendships WHERE status = 'pending' AND (requester_id = $1 OR addressee_id = $2)`,
+		if err := tx.QueryRow(ctx, qPendingCounts,
 			me, to).Scan(&out, &in); err != nil {
 			return err
 		}
@@ -76,8 +111,7 @@ func (s *Store) request(ctx context.Context, me, to string) (id, status string, 
 			return err
 		}
 		status, created = "pending", true
-		return tx.QueryRow(ctx, `INSERT INTO friendships (requester_id, addressee_id, status)
-			VALUES ($1, $2, 'pending') RETURNING id`, me, to).Scan(&id)
+		return tx.QueryRow(ctx, qInsertRequest, me, to).Scan(&id)
 	})
 	return id, status, created, err
 }
@@ -87,7 +121,7 @@ func acceptLocked(ctx context.Context, tx pgx.Tx, id, a, b string) error {
 	if err := friendsRoom(ctx, tx, a, b); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `UPDATE friendships SET status = 'accepted' WHERE id = $1`, id)
+	_, err := tx.Exec(ctx, qAccept, id)
 	return err
 }
 
@@ -95,10 +129,7 @@ func acceptLocked(ctx context.Context, tx pgx.Tx, id, a, b string) error {
 // Trava por usuário se o teto virar regra dura.
 func friendsRoom(ctx context.Context, tx pgx.Tx, a, b string) error {
 	var na, nb int
-	if err := tx.QueryRow(ctx, `SELECT
-		count(*) FILTER (WHERE requester_id = $1 OR addressee_id = $1),
-		count(*) FILTER (WHERE requester_id = $2 OR addressee_id = $2)
-		FROM friendships WHERE status = 'accepted' AND (requester_id IN ($1, $2) OR addressee_id IN ($1, $2))`,
+	if err := tx.QueryRow(ctx, qFriendsCount,
 		a, b).Scan(&na, &nb); err != nil {
 		return err
 	}
@@ -110,8 +141,7 @@ func friendsRoom(ctx context.Context, tx pgx.Tx, a, b string) error {
 
 func (s *Store) accept(ctx context.Context, me, id string) (from string, err error) {
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT requester_id FROM friendships
-			WHERE id = $1 AND addressee_id = $2 AND status = 'pending'`, id, me).Scan(&from)
+		err := tx.QueryRow(ctx, qPendingTo, id, me).Scan(&from)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -122,8 +152,7 @@ func (s *Store) accept(ctx context.Context, me, id string) (from string, err err
 			return err
 		}
 		// relê sob o lock: um bloqueio ou cancelamento pode ter apagado o pedido no meio
-		err = tx.QueryRow(ctx, `SELECT requester_id FROM friendships
-			WHERE id = $1 AND addressee_id = $2 AND status = 'pending' FOR UPDATE`, id, me).Scan(&from)
+		err = tx.QueryRow(ctx, qPendingToForUpdate, id, me).Scan(&from)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -136,8 +165,7 @@ func (s *Store) accept(ctx context.Context, me, id string) (from string, err err
 }
 
 func (s *Store) decline(ctx context.Context, me, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM friendships
-		WHERE id = $1 AND status = 'pending' AND (requester_id = $2 OR addressee_id = $2)`, id, me)
+	tag, err := s.pool.Exec(ctx, qDecline, id, me)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
@@ -145,8 +173,7 @@ func (s *Store) decline(ctx context.Context, me, id string) error {
 }
 
 func (s *Store) remove(ctx context.Context, me, other string) (friends bool, err error) {
-	err = s.pool.QueryRow(ctx, `WITH d AS (DELETE FROM friendships WHERE `+pairIs+` RETURNING status)
-		SELECT EXISTS (SELECT 1 FROM d WHERE status = 'accepted')`, me, other).Scan(&friends)
+	err = s.pool.QueryRow(ctx, qDeletePair, me, other).Scan(&friends)
 	return friends, err
 }
 
@@ -155,14 +182,13 @@ func (s *Store) block(ctx context.Context, me, other string) (friends bool, err 
 		if _, err := tx.Exec(ctx, lockPair, me, other); err != nil {
 			return err
 		}
-		tag, err := tx.Exec(ctx, `INSERT INTO blocks (blocker_id, blocked_id)
-			SELECT $1, id FROM users WHERE id = $2 ON CONFLICT DO NOTHING`, me, other)
+		tag, err := tx.Exec(ctx, qBlock, me, other)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() == 0 {
 			var exists bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, other).Scan(&exists); err != nil {
+			if err := tx.QueryRow(ctx, qUserExists, other).Scan(&exists); err != nil {
 				return err
 			}
 			if !exists {
@@ -170,29 +196,22 @@ func (s *Store) block(ctx context.Context, me, other string) (friends bool, err 
 			}
 		}
 		// "sem envelopes": a fila pendente entre os dois some junto (senão sairia no backlog e no GET /v1/envelopes)
-		if _, err := tx.Exec(ctx, `DELETE FROM envelopes WHERE (recipient_id = $1 AND sender_id = $2)
-			OR (recipient_id = $2 AND sender_id = $1)`, me, other); err != nil {
+		if _, err := tx.Exec(ctx, qDeleteEnvelopesPair, me, other); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `WITH d AS (DELETE FROM friendships WHERE `+pairIs+` RETURNING status)
-			SELECT EXISTS (SELECT 1 FROM d WHERE status = 'accepted')`, me, other).Scan(&friends)
+		return tx.QueryRow(ctx, qDeletePair, me, other).Scan(&friends)
 	})
 	return friends, err
 }
 
 func (s *Store) unblock(ctx context.Context, me, other string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM blocks WHERE blocker_id = $1 AND blocked_id = $2`, me, other)
+	_, err := s.pool.Exec(ctx, qUnblock, me, other)
 	return err
 }
 
 func (s *Store) list(ctx context.Context, me string) (List, error) {
 	l := List{Friends: []Friend{}, Incoming: []Request{}, Outgoing: []Request{}}
-	rows, err := s.pool.Query(ctx, `SELECT f.id, f.status, f.requester_id = $1, u.id, u.friend_code, f.created_at
-		FROM friendships f
-		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
-		WHERE f.requester_id = $1 OR f.addressee_id = $1
-		ORDER BY f.created_at, f.id
-		LIMIT $2`, me, listLimit)
+	rows, err := s.pool.Query(ctx, qList, me, listLimit)
 	if err != nil {
 		return l, err
 	}

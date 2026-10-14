@@ -6,14 +6,16 @@ Planos do apitest inteiro com o servidor 18b58ed (consulta única no Auth do WS,
 
 ## Carga de 15 mil (roteiro de loadtest/README.md)
 
-| Métrica | Antes | Depois (b18bf29) | Meta |
-|---|---|---|---|
-| Conexões · quedas · perdas | 15 mil · 0 · 0 | 15 mil · 0 · 0 | 0 perdas |
-| Latência posição p99 | 4–16 ms | 4,0 ms | < 50 ms |
-| Latência envelope p99 | 4–16 ms | 9,4 ms | < 50 ms |
-| RAM por conexão viva | 37 KB | 24,8 KB | ≤ 25 KB |
-| RAM por conexão no pico | 55,7 KB | 32 KB | |
-| CPU média | 0,48 núcleo (1 GiB) | 0,45 núcleo | |
+| Métrica | Antes | Depois (b18bf29) | Escritor sob demanda | Meta |
+|---|---|---|---|---|
+| Conexões · quedas · perdas | 15 mil · 0 · 0 | 15 mil · 0 · 0 | 15 mil · 0 · 0 (0 sem Ack, 0 duplicados) | 0 perdas |
+| Latência posição p99 | 4–16 ms | 4,0 ms | 3,7 ms (máx 26 ms) | < 50 ms |
+| Latência envelope p99 | 4–16 ms | 9,4 ms | 5,8 ms (máx 39 ms) | < 50 ms |
+| RAM por conexão viva | 37 KB | 24,8 KB | 20,4 KB (342 − 37 MB) | ≤ 25 KB |
+| RAM por conexão no pico | 55,7 KB | 32 KB | 22,7 KB (370 − 37 MB) | ≤ 25 KB |
+| CPU média | 0,48 núcleo (1 GiB) | 0,45 núcleo | 0,43 núcleo | |
+| Location enviadas/s · recebidas/s | | | 3013 · 30134 | |
+| Envelopes enviados/s · entregues/s | | | 251 · 251 | |
 
 Perfilar perturba a latência: a mesma carga com captura de pprof deu envelope p99 de 168 ms (o perfil de heap força
 GC). Número de latência só vale de rodada sem pprof.

@@ -209,6 +209,16 @@ func (s *Service) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	mux.Handle("GET /v1/locations", authed(httpx.Timed(s.reqWait, s.locations)))
 }
 
+// Plano conferido em indexes_integration_test.go.
+const (
+	qFriends = `SELECT u.id, u.friend_code FROM friendships f
+		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
+		WHERE f.status = 'accepted' AND (f.requester_id = $1 OR f.addressee_id = $1)
+		AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
+			OR (b.blocker_id = u.id AND b.blocked_id = $1))
+		LIMIT $2`
+)
+
 type entry struct {
 	UserID     string `json:"user_id"`
 	FriendCode string `json:"friend_code"`
@@ -221,12 +231,7 @@ var entryOverhead = len(`{"user_id":"","friend_code":"","payload":""},`)
 // Redis fora → lista vazia, não erro (contrato).
 func (s *Service) locations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	rows, err := s.pool.Query(ctx, `SELECT u.id, u.friend_code FROM friendships f
-		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
-		WHERE f.status = 'accepted' AND (f.requester_id = $1 OR f.addressee_id = $1)
-		AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
-			OR (b.blocker_id = u.id AND b.blocked_id = $1))
-		LIMIT $2`, httpx.User(ctx), friendsLimit)
+	rows, err := s.pool.Query(ctx, qFriends, httpx.User(ctx), friendsLimit)
 	if err != nil {
 		httpx.DBError(w, "location", err)
 		return

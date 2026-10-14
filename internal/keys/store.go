@@ -12,6 +12,36 @@ import (
 
 const maxStored = 200 // one-time guardadas por tipo
 
+// Queries com o plano conferido em indexes_integration_test.go.
+const (
+	qIdentity      = `SELECT identity_key FROM devices WHERE user_id = $1`
+	qDeleteOneTime = `DELETE FROM one_time_prekeys WHERE user_id = $1`
+	qUpsertDevice  = `INSERT INTO devices (user_id, registration_id, identity_key,
+				signed_prekey_id, signed_prekey, signed_prekey_sig,
+				kyber_last_resort_id, kyber_last_resort, kyber_last_resort_sig)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (user_id) DO UPDATE SET registration_id = $2, identity_key = $3,
+				signed_prekey_id = $4, signed_prekey = $5, signed_prekey_sig = $6,
+				kyber_last_resort_id = $7, kyber_last_resort = $8, kyber_last_resort_sig = $9, updated_at = now()`
+	qInsertOneTime = `INSERT INTO one_time_prekeys (user_id, kind, key_id, public_key, signature)
+		SELECT $1, $2, k, p, s FROM unnest($3::integer[], $4::bytea[], $5::bytea[]) AS t(k, p, s)
+		ON CONFLICT (user_id, kind, key_id) DO NOTHING`
+	qCount = `SELECT count(*) FILTER (WHERE kind = 'ec'), count(*) FILTER (WHERE kind = 'kyber')
+		FROM one_time_prekeys WHERE user_id = $1`
+	qCanFetch = `SELECT EXISTS (SELECT 1 FROM friendships WHERE status = 'accepted'
+				AND least(requester_id, addressee_id) = least($1::uuid, $2::uuid)
+				AND greatest(requester_id, addressee_id) = greatest($1::uuid, $2::uuid))
+			AND NOT EXISTS (SELECT 1 FROM blocks
+				WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))`
+	qDevice = `SELECT registration_id, identity_key, signed_prekey_id, signed_prekey, signed_prekey_sig,
+				kyber_last_resort_id, kyber_last_resort, kyber_last_resort_sig
+			FROM devices WHERE user_id = $1`
+	// ORDER BY key_id: o índice único (user_id, kind, key_id) já entrega a ordem; por id o Postgres varria a PK.
+	qTake = `DELETE FROM one_time_prekeys WHERE id = (SELECT id FROM one_time_prekeys
+			WHERE user_id = $1 AND kind = $2 ORDER BY key_id LIMIT 1 FOR UPDATE SKIP LOCKED)
+			RETURNING key_id, public_key, signature`
+)
+
 var (
 	errForbidden = errors.New("forbidden")
 	errNotFound  = errors.New("not_found")
@@ -30,22 +60,16 @@ func (s *Store) put(ctx context.Context, user string, b *bundle) error {
 			return err
 		}
 		var old []byte
-		err := tx.QueryRow(ctx, `SELECT identity_key FROM devices WHERE user_id = $1`, user).Scan(&old)
+		err := tx.QueryRow(ctx, qIdentity, user).Scan(&old)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 		if err == nil && !bytes.Equal(old, b.IdentityKey) {
-			if _, err := tx.Exec(ctx, `DELETE FROM one_time_prekeys WHERE user_id = $1`, user); err != nil {
+			if _, err := tx.Exec(ctx, qDeleteOneTime, user); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO devices (user_id, registration_id, identity_key,
-				signed_prekey_id, signed_prekey, signed_prekey_sig,
-				kyber_last_resort_id, kyber_last_resort, kyber_last_resort_sig)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			ON CONFLICT (user_id) DO UPDATE SET registration_id = $2, identity_key = $3,
-				signed_prekey_id = $4, signed_prekey = $5, signed_prekey_sig = $6,
-				kyber_last_resort_id = $7, kyber_last_resort = $8, kyber_last_resort_sig = $9, updated_at = now()`,
+		if _, err := tx.Exec(ctx, qUpsertDevice,
 			user, b.RegistrationID, b.IdentityKey,
 			*b.SignedPrekey.KeyID, b.SignedPrekey.PublicKey, b.SignedPrekey.Signature,
 			*b.KyberLastResort.KeyID, b.KyberLastResort.PublicKey, b.KyberLastResort.Signature); err != nil {
@@ -79,9 +103,7 @@ func insertOneTime(ctx context.Context, tx pgx.Tx, user, kind string, keys []pre
 	for i, k := range keys {
 		ids[i], pubs[i], sigs[i] = *k.KeyID, k.PublicKey, k.Signature
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO one_time_prekeys (user_id, kind, key_id, public_key, signature)
-		SELECT $1, $2, k, p, s FROM unnest($3::integer[], $4::bytea[], $5::bytea[]) AS t(k, p, s)
-		ON CONFLICT (user_id, kind, key_id) DO NOTHING`, user, kind, ids, pubs, sigs)
+	_, err := tx.Exec(ctx, qInsertOneTime, user, kind, ids, pubs, sigs)
 	return err
 }
 
@@ -90,8 +112,7 @@ type querier interface {
 }
 
 func count(ctx context.Context, q querier, user string) (ec, ky int, err error) {
-	err = q.QueryRow(ctx, `SELECT count(*) FILTER (WHERE kind = 'ec'), count(*) FILTER (WHERE kind = 'kyber')
-		FROM one_time_prekeys WHERE user_id = $1`, user).Scan(&ec, &ky)
+	err = q.QueryRow(ctx, qCount, user).Scan(&ec, &ky)
 	return ec, ky, err
 }
 
@@ -103,11 +124,7 @@ func (s *Store) fetch(ctx context.Context, me, other string) (*fetched, error) {
 	var out *fetched
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var ok bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM friendships WHERE status = 'accepted'
-				AND least(requester_id, addressee_id) = least($1::uuid, $2::uuid)
-				AND greatest(requester_id, addressee_id) = greatest($1::uuid, $2::uuid))
-			AND NOT EXISTS (SELECT 1 FROM blocks
-				WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))`,
+		if err := tx.QueryRow(ctx, qCanFetch,
 			me, other).Scan(&ok); err != nil {
 			return err
 		}
@@ -115,9 +132,7 @@ func (s *Store) fetch(ctx context.Context, me, other string) (*fetched, error) {
 			return errForbidden
 		}
 		f := &fetched{SignedPrekey: &keyOut{}, KyberPrekey: &keyOut{}}
-		err := tx.QueryRow(ctx, `SELECT registration_id, identity_key, signed_prekey_id, signed_prekey, signed_prekey_sig,
-				kyber_last_resort_id, kyber_last_resort, kyber_last_resort_sig
-			FROM devices WHERE user_id = $1`, other).Scan(&f.RegistrationID, &f.IdentityKey,
+		err := tx.QueryRow(ctx, qDevice, other).Scan(&f.RegistrationID, &f.IdentityKey,
 			&f.SignedPrekey.KeyID, &f.SignedPrekey.PublicKey, &f.SignedPrekey.Signature,
 			&f.KyberPrekey.KeyID, &f.KyberPrekey.PublicKey, &f.KyberPrekey.Signature)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -126,12 +141,8 @@ func (s *Store) fetch(ctx context.Context, me, other string) (*fetched, error) {
 		if err != nil {
 			return err
 		}
-		// ORDER BY key_id: o índice único (user_id, kind, key_id) já entrega a ordem; por id o Postgres varria a PK.
-		const take = `DELETE FROM one_time_prekeys WHERE id = (SELECT id FROM one_time_prekeys
-			WHERE user_id = $1 AND kind = $2 ORDER BY key_id LIMIT 1 FOR UPDATE SKIP LOCKED)
-			RETURNING key_id, public_key, signature`
 		var ky keyOut
-		err = tx.QueryRow(ctx, take, other, "kyber").Scan(&ky.KeyID, &ky.PublicKey, &ky.Signature)
+		err = tx.QueryRow(ctx, qTake, other, "kyber").Scan(&ky.KeyID, &ky.PublicKey, &ky.Signature)
 		switch {
 		case err == nil:
 			f.KyberPrekey = &ky
@@ -139,7 +150,7 @@ func (s *Store) fetch(ctx context.Context, me, other string) (*fetched, error) {
 			return err
 		}
 		var ec keyOut
-		err = tx.QueryRow(ctx, take, other, "ec").Scan(&ec.KeyID, &ec.PublicKey, &ec.Signature)
+		err = tx.QueryRow(ctx, qTake, other, "ec").Scan(&ec.KeyID, &ec.PublicKey, &ec.Signature)
 		switch {
 		case err == nil:
 			f.OneTimePrekey = &ec
