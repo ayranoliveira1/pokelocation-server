@@ -15,19 +15,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PlanNode é um nó do EXPLAIN, achatado (Plan devolve a árvore em pré-ordem).
 type PlanNode struct {
-	Type     string     `json:"Node Type"`
-	Relation string     `json:"Relation Name"`
-	Index    string     `json:"Index Name"`
-	Plans    []PlanNode `json:"Plans"`
+	Type      string     `json:"Node Type"`
+	Relation  string     `json:"Relation Name"`
+	Index     string     `json:"Index Name"`
+	IndexCond string     `json:"Index Cond"`
+	Plans     []PlanNode `json:"Plans"`
 }
 
-// Pools vindos de Seed: planejador de verdade. Os demais (banco vazio) planejam com seqscan desligado, porque num banco
-// vazio o Postgres escolhe Seq Scan de qualquer jeito; assim só sobra Seq Scan se nenhum índice serve à query.
-var seeded sync.Map // *pgxpool.Pool → []string (tabelas grandes)
+// Fora do seed o banco está vazio e o Postgres escolheria Seq Scan de qualquer jeito: lá o plano roda com seqscan
+// desligado, e só sobra Seq Scan se nenhum índice serve à query.
+var seeded sync.Map
 
-// Seed devolve o banco de loadtest/seed (S12_DATABASE_URL) ou pula o teste.
 func Seed(t testing.TB) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("S12_DATABASE_URL")
@@ -50,7 +49,6 @@ func Seed(t testing.TB) *pgxpool.Pool {
 	return pool
 }
 
-// Plan devolve o plano de sql com os valores dados.
 func Plan(t testing.TB, pool *pgxpool.Pool, sql string, args ...any) []PlanNode {
 	t.Helper()
 	custom, _, err := plans(pool, "", sql, args, true)
@@ -60,7 +58,6 @@ func Plan(t testing.TB, pool *pgxpool.Pool, sql string, args ...any) []PlanNode 
 	return custom
 }
 
-// GenericPlan devolve o plano genérico, o que o Postgres passa a usar para prepared statements (o pgx prepara tudo).
 func GenericPlan(t testing.TB, pool *pgxpool.Pool, sql string) []PlanNode {
 	t.Helper()
 	_, generic, err := plans(pool, "", sql, nil, false)
@@ -70,8 +67,7 @@ func GenericPlan(t testing.TB, pool *pgxpool.Pool, sql string) []PlanNode {
 	return generic
 }
 
-// RequireIndex reprova se, no plano com os valores ou no genérico, nenhum dos índices aparece ou há Seq Scan (no seed,
-// só em tabela grande). Para exigir vários índices juntos, chame uma vez por índice.
+// RequireIndex confere também o plano genérico: o pgx prepara tudo, e o Postgres passa a usá-lo.
 func RequireIndex(t testing.TB, pool *pgxpool.Pool, sql string, args []any, anyOf ...string) {
 	t.Helper()
 	for _, p := range problems(pool, "", sql, args, false, anyOf) {
@@ -79,7 +75,6 @@ func RequireIndex(t testing.TB, pool *pgxpool.Pool, sql string, args []any, anyO
 	}
 }
 
-// RequireIndexNoSort: RequireIndex e, além disso, a ordem tem de vir do índice (queries paginadas, ORDER BY … LIMIT).
 func RequireIndexNoSort(t testing.TB, pool *pgxpool.Pool, sql string, args []any, anyOf ...string) {
 	t.Helper()
 	for _, p := range problems(pool, "", sql, args, true, anyOf) {
@@ -87,12 +82,9 @@ func RequireIndexNoSort(t testing.TB, pool *pgxpool.Pool, sql string, args []any
 	}
 }
 
-// problems devolve o que reprova a query; setup roda na mesma transação antes do EXPLAIN (o teste de sanidade derruba
-// um índice ali).
 func problems(pool *pgxpool.Pool, setup, sql string, args []any, noSort bool, anyOf []string) []string {
-	// Sem Sort, a pergunta é se o índice entrega a ordem. Num banco vazio, com seqscan off, o planejador prefere
-	// Bitmap Index Scan + Sort (ordenar 0 linhas custa nada), e bitmap nunca entrega ordem: desliga também. No
-	// RequireIndex não, porque as queries com OR precisam do BitmapOr; no seed também não (planejador de verdade).
+	// Num banco vazio, Bitmap Index Scan + Sort sai de graça, e bitmap nunca entrega ordem. Só aqui: as queries com OR
+	// precisam do BitmapOr.
 	big, isSeed := seeded.Load(pool)
 	if noSort && !isSeed {
 		setup = "SET LOCAL enable_bitmapscan = off; " + setup
@@ -111,20 +103,20 @@ func problems(pool *pgxpool.Pool, setup, sql string, args []any, noSort bool, an
 			if noSort && IsSort(n) {
 				out = append(out, fmt.Sprintf("%s: %s, a ordem não veio do índice", kind, n.Type))
 			}
-			if n.Index != "" {
+			// Com seqscan off, o planejador pode varrer o índice inteiro com Filter: isso não é usar o índice para buscar.
+			if n.Index != "" && n.IndexCond != "" {
 				used = append(used, n.Index)
 			}
 		}
 		if !slices.ContainsFunc(anyOf, func(i string) bool { return slices.Contains(used, i) }) {
-			out = append(out, fmt.Sprintf("%s: nenhum de %v (usados: %v)", kind, anyOf, used))
+			out = append(out, fmt.Sprintf("%s: nenhum de %v com Index Cond (buscando por índice: %v)", kind, anyOf, used))
 		}
 	}
 	sort.Strings(out)
 	return out
 }
 
-// plans faz os dois EXPLAIN numa transação desfeita: DELETE e FOR UPDATE só são planejados, e o SET LOCAL e o setup
-// morrem junto. Só o SQL do store vai concatenado ao EXPLAIN; os valores seguem como parâmetros do pgx.
+// Só o SQL do store é concatenado ao EXPLAIN; os valores vão como parâmetros. O rollback desfaz o SET LOCAL e o setup.
 func plans(pool *pgxpool.Pool, setup, sql string, args []any, withCustom bool) (custom, generic []PlanNode, err error) {
 	ctx := context.Background()
 	tx, err := pool.Begin(ctx)
@@ -179,14 +171,12 @@ func flatten(out []byte) ([]PlanNode, error) {
 	return all, nil
 }
 
-// Sample: valores que tornam o plano representativo. No seed, o usuário com mais amigos e o destinatário com a maior
-// fila (onde um índice ruim mais pesa); num banco vazio, valores que não existem, e o plano sai igual.
 type Sample struct {
 	User, Friend, Email, GoogleSub, FriendCode, Family, Recipient, Sender, MsgID, KeyUser string
 	TokenHash                                                                             []byte
 }
 
-var samples sync.Map // *pgxpool.Pool → Sample
+var samples sync.Map
 
 func SampleOf(t testing.TB, pool *pgxpool.Pool) Sample {
 	t.Helper()
@@ -219,5 +209,4 @@ func SampleOf(t testing.TB, pool *pgxpool.Pool) Sample {
 	return s
 }
 
-// IsSort: nó de ordenação (Sort, Incremental Sort).
 func IsSort(n PlanNode) bool { return strings.HasSuffix(n.Type, "Sort") }

@@ -2,7 +2,6 @@ package testdb
 
 import "testing"
 
-// O helper tem de reprovar quando o índice some: derruba o índice dentro da transação do EXPLAIN.
 func TestPlanReprovaSemIndice(t *testing.T) {
 	t.Parallel()
 	pool := Pool(t)
@@ -21,15 +20,21 @@ func TestPlanReprovaSemIndice(t *testing.T) {
 			[]string{"friendships_requester", "friendships_addressee"}},
 		{"índice de UNIQUE", "ALTER TABLE users DROP CONSTRAINT users_email_key", login, []any{"x@y"}, false,
 			[]string{"users_email_key"}},
+		// O cast tira o predicado do índice: o planejador varre users_pkey inteiro com Filter.
+		{"índice varrido com Filter", "", `SELECT id FROM users WHERE id = $1`, []any{none}, false, []string{"users_pkey"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if p := problems(pool, "", c.sql, c.args, c.noSort, c.want); len(p) != 0 {
 				t.Fatalf("com o índice: %v", p)
 			}
-			if p := problems(pool, c.setup, c.sql, c.args, c.noSort, c.want); len(p) == 0 {
-				t.Errorf("sem o índice (%s): passou", c.setup)
+			bad, setup := c.sql, c.setup
+			if setup == "" {
+				bad = `SELECT id FROM users WHERE id::text = $1`
+			}
+			if p := problems(pool, setup, bad, c.args, c.noSort, c.want); len(p) == 0 {
+				t.Errorf("sem buscar pelo índice (%s): passou", c.name)
 			} else {
-				t.Logf("sem o índice: %v", p)
+				t.Logf("sem buscar pelo índice: %v", p)
 			}
 		})
 	}
