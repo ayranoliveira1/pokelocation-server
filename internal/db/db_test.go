@@ -33,6 +33,13 @@ func TestMigrate(t *testing.T) {
 	}
 	defer pool.Close()
 
+	for name, want := range map[string]string{"statement_timeout": statementTimeout,
+		"idle_in_transaction_session_timeout": idleInTxTimeout} {
+		var got string
+		if err := pool.QueryRow(ctx, "SHOW "+name).Scan(&got); err != nil || got != want {
+			t.Errorf("%s = %q (%v), want %q", name, got, err, want)
+		}
+	}
 	for range 2 {
 		if err := Migrate(ctx, pool); err != nil {
 			t.Fatal(err)

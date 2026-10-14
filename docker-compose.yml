@@ -31,7 +31,8 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       PUBLIC_URL: ${PUBLIC_URL:-https://localhost}
-      GOMEMLIMIT: ${GOMEMLIMIT:-512MiB}
+      # abaixo do pico vivo o GC roda sem parar (15 mil conexões com 512MiB: 5 núcleos só de GC)
+      GOMEMLIMIT: ${GOMEMLIMIT:-1GiB}
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_started}

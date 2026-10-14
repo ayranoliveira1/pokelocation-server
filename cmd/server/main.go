@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,6 +28,7 @@ import (
 
 type config struct {
 	addr, databaseURL, redisURL string
+	pprofAddr                   string
 	cluster                     bool
 	auth                        auth.Config
 }
@@ -36,6 +38,7 @@ func loadConfig() (config, error) {
 		addr:        os.Getenv("ADDR"),
 		databaseURL: os.Getenv("DATABASE_URL"),
 		redisURL:    os.Getenv("REDIS_URL"),
+		pprofAddr:   os.Getenv("PPROF_ADDR"),
 		cluster:     os.Getenv("CLUSTER") == "1",
 		auth: auth.Config{
 			SigningKey:         os.Getenv("AUTH_SIGNING_KEY"),
@@ -125,6 +128,9 @@ func run() error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
+	if cfg.pprofAddr != "" {
+		go servePprof(cfg.pprofAddr)
+	}
 	slog.Info("ouvindo", "addr", cfg.addr)
 
 	select {
@@ -163,5 +169,19 @@ func daily(ctx context.Context, name string, f func(context.Context) error) {
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// servePprof: mux próprio, nunca o da API. PPROF_ADDR tem de ser interno (ex.: 127.0.0.1:6060).
+func servePprof(addr string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	slog.Info("pprof", "addr", addr)
+	if err := srv.ListenAndServe(); err != nil {
+		slog.Warn("pprof parado", "err_type", fmt.Sprintf("%T", err))
 	}
 }

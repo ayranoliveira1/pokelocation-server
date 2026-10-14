@@ -24,6 +24,13 @@ const lockID = 0x706f6b656c6f63
 // o Auth do WS, 4 consultas cada, ao mesmo tempo) e os Auths estouram o prazo. pool_max_conns no DSN tem precedência.
 const maxConns = 32
 
+// Teto no servidor para query presa ou transação esquecida aberta segurar conexão do pool sem limite. Os handlers
+// têm prazo próprio, menor; isto é a rede de segurança.
+const (
+	statementTimeout = "10s"
+	idleInTxTimeout  = "30s"
+)
+
 func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
@@ -32,6 +39,9 @@ func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	if !strings.Contains(url, "pool_max_conns") {
 		cfg.MaxConns = maxConns
 	}
+	rp := cfg.ConnConfig.RuntimeParams
+	rp["statement_timeout"] = statementTimeout
+	rp["idle_in_transaction_session_timeout"] = idleInTxTimeout
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -51,6 +61,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockID); err != nil {
+			return err
+		}
+		// criar índice em tabela grande passa do statement_timeout do pool
+		if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = 0`); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_version (
