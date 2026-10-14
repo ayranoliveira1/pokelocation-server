@@ -53,6 +53,8 @@ deixado INVALID por uma falha é apagado e recriado na próxima subida). Índice
 migração, segue transacional. Numa migração no-transaction, a versão só é gravada no fim: **todo** comando tem de ser
 idempotente (`IF NOT EXISTS`/`IF EXISTS`), e nenhum pode ter `;` no meio (string, corpo de função), porque os comandos
 são separados pelo `;` do fim da linha.
+ponytail: coluna nova com `CHECK` na mesma linha valida a tabela inteira sob lock exclusivo (ok com tabela pequena; a
+0007 limita a espera com `lock_timeout`). Com tabela grande: `ADD CONSTRAINT … NOT VALID` e depois `VALIDATE CONSTRAINT`.
 
 ## Testes
 

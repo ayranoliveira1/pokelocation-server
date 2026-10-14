@@ -20,7 +20,13 @@ var reserved = map[string]bool{
 // Check devolve o @nome normalizado (trim + minúsculas) ou ErrInvalid/ErrReserved. O CHECK da coluna no banco repete
 // a regra de formato, então nada fora dela chega a ser gravado.
 func Check(s string) (string, error) {
-	n := strings.ToLower(strings.TrimSpace(s))
+	n := strings.TrimSpace(s)
+	for i := 0; i < len(n); i++ {
+		if n[i] >= 0x80 { // antes do ToLower, que é Unicode: o sinal Kelvin (U+212A) viraria 'k'
+			return "", ErrInvalid
+		}
+	}
+	n = strings.ToLower(n)
 	if !valid(n) {
 		return "", ErrInvalid
 	}

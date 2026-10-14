@@ -23,6 +23,8 @@ func TestCheck(t *testing.T) {
 		"ana-b":                 ErrInvalid,
 		"joão":                  ErrInvalid,
 		"ａｎａ":                   ErrInvalid,
+		"\u212Aelvin":           ErrInvalid,
+		"İstanbul":              ErrInvalid,
 		"":                      ErrInvalid,
 		"Admin":                 ErrReserved,
 		"pokelocation":          ErrReserved,
