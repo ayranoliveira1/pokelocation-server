@@ -43,7 +43,15 @@ Instale `caddy-local-root.crt` só no emulador; só a build debug do app confia 
 | `ADDR` | `:8080` | endereço HTTP interno |
 | `GOMEMLIMIT` | `1GiB` no compose | ~70% da RAM da máquina/container; abaixo do pico vivo (~37 KB por conexão) o GC roda sem parar. `GOGC` fica no padrão |
 
-As migrações (`internal/db/migrations`) rodam sozinhas na subida.
+As migrações (`internal/db/migrations`) rodam sozinhas na subida, cada uma na sua transação. Migração commitada não
+se reescreve: mudança vai numa nova.
+
+**Índice novo em tabela que já existe** vai numa migração que começa com `-- migrate:no-transaction`, com
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS` (não trava escrita; roda fora de transação, um comando por vez; um índice
+deixado INVALID por uma falha é apagado e recriado na próxima subida). Índice criado junto da própria tabela, na mesma
+migração, segue transacional. Numa migração no-transaction, a versão só é gravada no fim: **todo** comando tem de ser
+idempotente (`IF NOT EXISTS`/`IF EXISTS`), e nenhum pode ter `;` no meio (string, corpo de função), porque os comandos
+são separados pelo `;` do fim da linha.
 
 ## Testes
 
