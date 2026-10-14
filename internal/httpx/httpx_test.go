@@ -3,9 +3,11 @@ package httpx
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -41,5 +43,14 @@ func TestDBError(t *testing.T) {
 		if w.Code != want || strings.Contains(w.Body.String(), "segredo") {
 			t.Errorf("%v: %d %s", err, w.Code, w.Body)
 		}
+	}
+}
+
+func TestTimed(t *testing.T) {
+	var deadline time.Time
+	Timed(time.Second, func(_ http.ResponseWriter, r *http.Request) { deadline, _ = r.Context().Deadline() })(
+		httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	if d := time.Until(deadline); d <= 0 || d > time.Second {
+		t.Fatalf("prazo %v", d)
 	}
 }

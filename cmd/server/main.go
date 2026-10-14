@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -156,21 +157,25 @@ func healthz(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// daily roda f na subida e depois a cada 24 h, até ctx acabar.
+// daily roda f a cada 24 h. A primeira espera 10–20 min: logo depois de um deploy o banco está ocupado com a onda de
+// reconexão, e o sorteio evita que várias instâncias limpem juntas.
 func daily(ctx context.Context, name string, f func(context.Context) error) {
-	t := time.NewTicker(24 * time.Hour)
-	defer t.Stop()
+	next := time.NewTimer(firstRun + rand.N(firstRun)) // #nosec G404 -- só espalha horário, não é segredo
+	defer next.Stop()
 	for {
-		if err := f(ctx); err != nil && ctx.Err() == nil {
-			slog.Warn(name, "err_type", fmt.Sprintf("%T", err))
-		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-next.C:
 		}
+		if err := f(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn(name, "err_type", fmt.Sprintf("%T", err))
+		}
+		next.Reset(24 * time.Hour)
 	}
 }
+
+const firstRun = 10 * time.Minute
 
 // servePprof: mux próprio, nunca o da API. PPROF_ADDR tem de ser interno (ex.: 127.0.0.1:6060).
 func servePprof(addr string) {
