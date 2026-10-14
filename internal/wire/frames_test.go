@@ -8,11 +8,15 @@ import (
 	"testing"
 )
 
-const uid = "0f8fad5b-d9cb-469f-a165-70867728950e"
+const (
+	uid = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	gid = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+)
 
 // Bytes escritos à mão no formato do social/ws/Frames.java: se isto quebrar, o app não fala mais com o servidor.
 func TestGolden(t *testing.T) {
 	u := hex.EncodeToString([]byte(uid))
+	g := hex.EncodeToString([]byte(gid))
 	for name, c := range map[string]struct {
 		got  []byte
 		want string
@@ -25,6 +29,9 @@ func TestGolden(t *testing.T) {
 		"locationOff":   {AppendLocationOff(nil, nil), "06"},
 		"locationOffSC": {AppendLocationOff(nil, []byte(uid)), "06" + "0024" + u},
 		"error":         {AppendError(nil, "forbidden"), "07" + "0009" + hex.EncodeToString([]byte("forbidden"))},
+		"groupCS":       {AppendGroupEnvelope(nil, []byte(gid), []byte("m1"), []byte{0xca}, nil), "08" + "0024" + g + "0002" + "6d31" + "00000001" + "ca"},
+		"groupSC":       {AppendGroupEnvelope(nil, []byte(gid), []byte("m1"), []byte{0xca}, []byte(uid)), "08" + "0024" + g + "0002" + "6d31" + "00000001" + "ca" + "0024" + u},
+		"groupChanged":  {AppendGroupChanged(nil, []byte(gid)), "09" + "0024" + g},
 	} {
 		if g := hex.EncodeToString(c.got); g != c.want {
 			t.Errorf("%s: %s, want %s", name, g, c.want)
@@ -64,6 +71,10 @@ func TestDecodeInvalid(t *testing.T) {
 		"envelope vazio":     {AppendEnvelope(nil, []byte(uid), []byte("m"), nil), ErrBadFrame},
 		"location vazia":     {AppendLocation(nil, nil), ErrBadFrame},
 		"locationUpd vazia":  {AppendLocationUpdate(nil, []byte(uid), nil), ErrBadFrame},
+		"grupo vazio":        {AppendGroupEnvelope(nil, []byte(gid), []byte("m"), nil, nil), ErrBadFrame},
+		"grupo 32KiB+1":      {AppendGroupEnvelope(nil, []byte(gid), []byte("m"), make([]byte, MaxEnvelopePayload+1), nil), ErrTooLarge},
+		"grupo id ruim":      {AppendGroupEnvelope(nil, []byte("x"), []byte("m"), []byte("p"), nil), ErrBadFrame},
+		"grupo from ruim":    {AppendGroupEnvelope(nil, []byte(gid), []byte("m"), []byte("p"), []byte("x")), ErrBadFrame},
 	} {
 		if _, err := Decode(c.b); !errors.Is(err, c.want) {
 			t.Errorf("%s: %v, want %v", name, err, c.want)
@@ -93,11 +104,14 @@ func TestFieldsDoNotAlias(t *testing.T) {
 func TestZeroAllocs(t *testing.T) {
 	env := AppendEnvelope(nil, []byte(uid), []byte("4d7e1f4a-msg"), make([]byte, 512))
 	loc := AppendLocation(nil, make([]byte, 120))
+	grp := AppendGroupEnvelope(nil, []byte(gid), []byte("4d7e1f4a-msg"), make([]byte, 512), nil)
 	from := []byte(uid)
 	out := make([]byte, 0, 1024)
 	if n := testing.AllocsPerRun(1000, func() {
 		f, _ := Decode(env)
 		out = AppendEnvelope(out[:0], from, f.MsgID, f.Payload)
+		f, _ = Decode(grp)
+		out = AppendGroupEnvelope(out[:0], f.Group, f.MsgID, f.Payload, from)
 		f, _ = Decode(loc)
 		out = AppendLocationUpdate(out[:0], from, f.Payload)
 	}); n != 0 {
@@ -119,6 +133,10 @@ func reencode(f Frame) []byte {
 		return AppendLocationUpdate(nil, f.Peer, f.Payload)
 	case LocationOff:
 		return AppendLocationOff(nil, f.Peer)
+	case GroupEnvelope:
+		return AppendGroupEnvelope(nil, f.Group, f.MsgID, f.Payload, f.Peer)
+	case GroupChanged:
+		return AppendGroupChanged(nil, f.Group)
 	default:
 		return AppendError(nil, string(f.Code))
 	}
@@ -129,6 +147,8 @@ func FuzzDecode(f *testing.F) {
 	f.Add(AppendEnvelope(nil, []byte(uid), []byte("m1"), []byte("x")))
 	f.Add(AppendAuth(nil, []byte("tk")))
 	f.Add(AppendLocationOff(nil, []byte(uid)))
+	f.Add(AppendGroupEnvelope(nil, []byte(gid), []byte("m1"), []byte("x"), []byte(uid)))
+	f.Add(AppendGroupChanged(nil, []byte(gid)))
 	f.Add([]byte{Location, 0, 0, 0, 1, 7})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		fr, err := Decode(b)

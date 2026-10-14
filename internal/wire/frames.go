@@ -17,6 +17,8 @@ const (
 	LocationUpdate byte = 5 // S→C: str from, bin payload
 	LocationOff    byte = 6 // C→S: vazio · S→C: str from
 	Error          byte = 7 // S→C: str code
+	GroupEnvelope  byte = 8 // C→S: str group_id, str client_msg_id, bin payload · S→C: os mesmos + str from
+	GroupChanged   byte = 9 // S→C: str group_id
 )
 
 const (
@@ -35,10 +37,11 @@ var (
 // Frame: os campos FATIAM o buffer de entrada e valem só enquanto ele não for reutilizado.
 type Frame struct {
 	Type    byte
-	Peer    []byte // Auth: token; Envelope/Ack/LocationUpdate/LocationOff: o outro usuário (UUID); nil se não houver
-	MsgID   []byte // Envelope, Ack
+	Peer    []byte // Auth: token; Envelope/Ack/LocationUpdate/LocationOff/GroupEnvelope: o outro usuário (UUID); nil se não houver
+	Group   []byte // GroupEnvelope, GroupChanged
+	MsgID   []byte // Envelope, Ack, GroupEnvelope
 	Code    []byte // Error
-	Payload []byte // Envelope, Location, LocationUpdate
+	Payload []byte // Envelope, Location, LocationUpdate, GroupEnvelope
 }
 
 // Decode aceita as duas direções; recusar o tipo errado para a direção é de quem chama.
@@ -65,6 +68,13 @@ func Decode(b []byte) (Frame, error) {
 		}
 	case Error:
 		f.Code = r.str()
+	case GroupEnvelope:
+		f.Group, f.MsgID, f.Payload = r.uuid(), r.msgID(), r.bin()
+		if len(r.b) > r.i { // C→S termina no payload; o from vem só do servidor
+			f.Peer = r.uuid()
+		}
+	case GroupChanged:
+		f.Group = r.uuid()
 	default:
 		return f, ErrBadFrame
 	}
@@ -74,7 +84,7 @@ func Decode(b []byte) (Frame, error) {
 	if f.Payload != nil && len(f.Payload) == 0 { // o app nunca manda; envelope vazio viraria linha inútil no banco
 		return f, ErrBadFrame
 	}
-	if (f.Type == Envelope && len(f.Payload) > MaxEnvelopePayload) ||
+	if ((f.Type == Envelope || f.Type == GroupEnvelope) && len(f.Payload) > MaxEnvelopePayload) ||
 		((f.Type == Location || f.Type == LocationUpdate) && len(f.Payload) > MaxLocationPayload) {
 		return f, ErrTooLarge
 	}
@@ -190,6 +200,17 @@ func AppendLocationOff(dst, from []byte) []byte {
 	}
 	return appendStr(dst, from)
 }
+
+// AppendGroupEnvelope: from nil = o frame do cliente.
+func AppendGroupEnvelope(dst, group, msgID, payload, from []byte) []byte {
+	dst = appendBin(appendStr(appendStr(append(dst, GroupEnvelope), group), msgID), payload)
+	if from == nil {
+		return dst
+	}
+	return appendStr(dst, from)
+}
+
+func AppendGroupChanged(dst, group []byte) []byte { return appendStr(append(dst, GroupChanged), group) }
 
 func AppendError(dst []byte, code string) []byte {
 	n := len(code)
