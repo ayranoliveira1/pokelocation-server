@@ -20,9 +20,20 @@ var migrations embed.FS
 // lockID serializa instâncias subindo juntas (pg_advisory_xact_lock).
 const lockID = 0x706f6b656c6f63 // "pokeloc"
 
+// maxConns: o padrão do pgx (max(4, NumCPU)) não aguenta uma onda de reconexão depois de um deploy (todo cliente faz
+// o Auth do WS, 4 consultas cada, ao mesmo tempo) e os Auths estouram o prazo. pool_max_conns no DSN tem precedência.
+const maxConns = 32
+
 // Open conecta e confere com um ping. pgx usa prepared statements em cache por padrão.
 func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, url)
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.Contains(url, "pool_max_conns") {
+		cfg.MaxConns = maxConns
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

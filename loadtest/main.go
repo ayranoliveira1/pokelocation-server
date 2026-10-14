@@ -1,19 +1,6 @@
-// Gerador de carga do protocolo real (spec §8, plano S6/S7): N conexões WS autenticadas, Location a cada 5 s e
-// Envelopes entre amigos. Mede latência ponta a ponta (timestamp no payload), perdas (todo envelope chega e leva Ack)
-// e RSS do servidor por conexão. Herdeiro do gerador do spike Go×Rust.
-//
-// Uso (servidor local com o Postgres/Redis do compose, como no `make run`; o .env já exportado):
-//
-//	go build -o /tmp/server ./cmd/server && (DATABASE_URL=… REDIS_URL=… /tmp/server &)
-//	go run ./loadtest -n 15000 -pid $(pgrep -f /tmp/server)
-//
-// Os usuários (lt-*@load.test) e amizades são semeados direto no banco e apagados no fim (-keep para manter). Os
-// tokens são assinados com AUTH_SIGNING_KEY, com tv = 0 (usuário novo).
-//
-// Portas: o macOS tem ~16 mil portas efêmeras por destino. O -url padrão espalha as conexões entre 127.0.0.1 e ::1
-// (dois destinos = ~32 mil). Para mais, acrescente destinos (outra porta, outro IP do servidor).
-//
-// Sai com código 1 se alguma meta falhar: todas conectadas, ≤ -max-kb por conexão, p99 < -p99, 0 perdas, 0 sem Ack.
+// Gerador de carga do protocolo WS real: latência ponta a ponta, perdas, RSS e CPU do servidor contra as metas da
+// spec. Roteiro e flags em loadtest/README.md. O -url padrão usa 127.0.0.1 e ::1 porque o macOS tem ~16 mil portas
+// efêmeras por destino.
 package main
 
 import (
@@ -68,12 +55,12 @@ type user struct{ id, token string }
 type client struct {
 	u    user
 	ws   *websocket.Conn
-	wmu  sync.Mutex // gorilla: um escritor por vez (sender e Acks do leitor)
+	wmu  sync.Mutex // gorilla aceita um escritor por vez: o sender e os Acks do leitor
 	wbuf []byte
 	peer []user
 }
 
-// Contadores. Envelopes medidos: chave "remetente|client_msg_id".
+// envs: chave "remetente|client_msg_id".
 var (
 	measuring, stopping              atomic.Bool
 	locSent, locRecv, envSent, drops atomic.Int64
@@ -129,31 +116,32 @@ func main() {
 	time.Sleep(*warm)
 
 	fmt.Println("MEASURE_START")
+	cpu0, wall0 := cpuTime(), time.Now()
 	measuring.Store(true)
 	peak := connRSS
 	for end := time.Now().Add(*measure); time.Now().Before(end); time.Sleep(2 * time.Second) {
 		peak = max(peak, rss())
 	}
 	measuring.Store(false)
+	cores := (cpuTime() - cpu0).Seconds() / time.Since(wall0).Seconds()
 	fmt.Println("MEASURE_END")
 	stopping.Store(true)
 	time.Sleep(*drain)
 	for _, c := range clients {
 		_ = c.ws.Close()
 	}
-	code := report(len(clients), idle, connRSS, peak)
+	code := report(len(clients), idle, connRSS, peak, cores)
 	cleanup()
 	os.Exit(code)
 }
 
-// seedUsers apaga uma rodada anterior e cria n usuários com amizades aceitas em anel (COPY: segundos para 15 mil).
 func seedUsers(ctx context.Context, db *pgx.Conn, key ed25519.PrivateKey) []user {
 	if _, err := db.Exec(ctx, `DELETE FROM users WHERE email LIKE $1`, emailLike); err != nil {
 		fail("limpeza: %v", err)
 	}
 	users := make([]user, *n)
 	rows := make([][]any, *n)
-	exp := time.Now().Add(*warm + *measure + *drain + 30*time.Minute).Unix() // a conexão vence no exp (api.md §6)
+	exp := time.Now().Add(*warm + *measure + *drain + 30*time.Minute).Unix() // o servidor fecha o WS no exp
 	for i := range users {
 		id := uuid()
 		users[i] = user{id: id, token: sign(key, map[string]any{"sub": id, "iat": time.Now().Unix(), "exp": exp, "tv": 0})}
@@ -176,7 +164,7 @@ func seedUsers(ctx context.Context, db *pgx.Conn, key ed25519.PrivateKey) []user
 	return users
 }
 
-// preflight: o token do 1º usuário vale no REST. Pega chave/tv errados antes de abrir 15 mil conexões.
+// preflight pega chave ou tv errados antes de abrir milhares de conexões.
 func preflight(u user) error {
 	base := strings.Replace(strings.Split(*urls, ",")[0], "ws", "http", 1)
 	base = strings.TrimSuffix(base, "/v1/ws")
@@ -251,7 +239,7 @@ func (c *client) write(frame func([]byte) []byte) error {
 	return c.ws.WriteMessage(websocket.BinaryMessage, c.wbuf)
 }
 
-// send: Location a cada -loc e um envelope a cada -msg, com fase aleatória para espalhar a carga.
+// send começa em fase aleatória para as conexões não mandarem em rajada.
 func (c *client) send() {
 	time.Sleep(time.Duration(randN(int64(*locEvery))))
 	loc := time.NewTicker(*locEvery)
@@ -308,7 +296,7 @@ func (c *client) read() {
 		case wire.LocationUpdate:
 			if measuring.Load() && len(f.Payload) >= 8 {
 				locRecv.Add(1)
-				if randN(10) == 0 { // amostra 10%: ~30 mil/s com 15 mil conexões
+				if randN(10) == 0 { // amostra: ~30 mil/s com 15 mil conexões
 					lat(&locLat, f.Payload)
 				}
 			}
@@ -327,7 +315,7 @@ func (c *client) read() {
 			if c.write(func(b []byte) []byte { return wire.AppendAck(b, from, id) }) != nil {
 				return
 			}
-		case wire.Ack: // S→C: o servidor gravou o envelope que eu mandei
+		case wire.Ack: // S→C: o servidor gravou o envelope
 			envMu.Lock()
 			if s := envs[c.u.id+"|"+string(f.MsgID)]; s != nil {
 				s.acked = true
@@ -339,7 +327,6 @@ func (c *client) read() {
 	}
 }
 
-// randN: fase, jitter e amostragem do gerador.
 func randN(n int64) int64 {
 	return mrand.Int64N(n) // #nosec G404 -- gerador de carga, não é segredo
 }
@@ -356,16 +343,18 @@ func count(code string) {
 	v.(*atomic.Int64).Add(1)
 }
 
-func report(conns int, idle, connRSS, peak int64) int {
+func report(conns int, idle, connRSS, peak int64, cores float64) int {
 	sec := measure.Seconds()
 	latMu.Lock()
 	pl, pe := pcts(locLat), pcts(envLat)
 	latMu.Unlock()
-	var lost, dup, noack int
+	var lost, dup, noack, delivered int
 	envMu.Lock()
 	for _, s := range envs {
 		if s.got == 0 {
 			lost++
+		} else {
+			delivered++
 		}
 		dup += s.dup
 		if !s.acked {
@@ -374,27 +363,56 @@ func report(conns int, idle, connRSS, peak int64) int {
 	}
 	envMu.Unlock()
 
+	locTx, locRx := float64(locSent.Load())/sec, float64(locRecv.Load())/sec
+	envTx, envRx := float64(envSent.Load())/sec, float64(delivered)/sec
 	fmt.Printf("RESULT conexões=%d quedas=%d\n", conns, drops.Load())
-	fmt.Printf("  location: enviadas/s=%.0f recebidas/s=%.0f p50=%v p99=%v max=%v\n",
-		float64(locSent.Load())/sec, float64(locRecv.Load())/sec, pl[0], pl[1], pl[2])
-	fmt.Printf("  envelope: enviados=%d perdidos=%d sem_ack=%d duplicados=%d p50=%v p99=%v max=%v\n",
-		envSent.Load(), lost, noack, dup, pe[0], pe[1], pe[2])
+	fmt.Printf("  location: enviadas/s=%.0f recebidas/s=%.0f p50=%v p99=%v max=%v\n", locTx, locRx, pl[0], pl[1], pl[2])
+	fmt.Printf("  envelope: enviados/s=%.1f entregues/s=%.1f enviados=%d perdidos=%d sem_ack=%d duplicados=%d p50=%v p99=%v max=%v\n",
+		envTx, envRx, envSent.Load(), lost, noack, dup, pe[0], pe[1], pe[2])
 	errCodes.Range(func(k, v any) bool {
 		fmt.Printf("  Error{%s}=%d\n", k, v.(*atomic.Int64).Load())
 		return true
 	})
-	ok := conns == *n && lost == 0 && noack == 0 && pl[1] < *maxP99 && pe[1] < *maxP99
+
+	ms := func(d time.Duration) string { return fmt.Sprintf("%.2f ms", float64(d)/1e6) }
+	yes := func(ok bool) string {
+		if ok {
+			return "ok"
+		}
+		return "**FALHOU**"
+	}
+	okConn, okLoss := conns == *n, lost == 0 && noack == 0
+	okP99 := pl[1] < *maxP99 && pe[1] < *maxP99
+	rows := [][3]string{
+		{"Conexões", fmt.Sprintf("%d de %d (quedas %d)", conns, *n, drops.Load()), yes(okConn)},
+	}
+	okRAM := true
 	if *pid != 0 && conns > 0 {
 		perConn := float64(peak-idle) / float64(conns)
-		fmt.Printf("  RSS ocioso=%.1f MB conectado=%.1f MB pico=%.1f MB por_conexão=%.2f KB\n",
-			float64(idle)/1024, float64(connRSS)/1024, float64(peak)/1024, perConn)
-		ok = ok && perConn <= *maxKB
+		okRAM = perConn <= *maxKB
+		rows = append(rows,
+			[3]string{"RAM ociosa / conectada / pico", fmt.Sprintf("%.1f / %.1f / %.1f MB",
+				float64(idle)/1024, float64(connRSS)/1024, float64(peak)/1024), ""},
+			[3]string{"RAM por conexão (pico − ocioso)", fmt.Sprintf("%.2f KB", perConn), yes(okRAM)},
+			[3]string{"CPU média do servidor", fmt.Sprintf("%.2f núcleo", cores), ""})
 	}
-	if ok {
+	rows = append(rows,
+		[3]string{"Location enviadas/s · recebidas/s", fmt.Sprintf("%.0f · %.0f", locTx, locRx), ""},
+		[3]string{"Envelopes enviados/s · entregues/s", fmt.Sprintf("%.1f · %.1f", envTx, envRx), ""},
+		[3]string{"Latência posição p50 / p99 / max", ms(pl[0]) + " / " + ms(pl[1]) + " / " + ms(pl[2]), yes(pl[1] < *maxP99)},
+		[3]string{"Latência envelope p50 / p99 / max", ms(pe[0]) + " / " + ms(pe[1]) + " / " + ms(pe[2]), yes(pe[1] < *maxP99)},
+		[3]string{"Envelopes perdidos · sem Ack · duplicados", fmt.Sprintf("%d · %d · %d", lost, noack, dup), yes(okLoss)})
+	fmt.Printf("\n| Métrica (%d conexões, %d amigos, janela de %v) | Valor | Meta |\n|---|---|---|\n", *n, *nFriends, *measure)
+	for _, r := range rows {
+		fmt.Printf("| %s | %s | %s |\n", r[0], r[1], r[2])
+	}
+	fmt.Printf("\nMetas: %d conexões, ≤ %.0f KB/conexão, p99 < %v, 0 perdas e 0 sem Ack.\n", *n, *maxKB, *maxP99)
+
+	if okConn && okLoss && okP99 && okRAM {
 		fmt.Println("METAS OK")
 		return 0
 	}
-	fmt.Printf("METAS FALHARAM (alvo: %d conexões, 0 perdas, 0 sem Ack, p99 < %v, ≤ %.0f KB/conexão)\n", *n, *maxP99, *maxKB)
+	fmt.Println("METAS FALHARAM")
 	return 1
 }
 
@@ -407,7 +425,7 @@ func pcts(l []time.Duration) [3]time.Duration {
 	return [3]time.Duration{l[len(l)/2], l[(len(l)-1)*99/100], l[len(l)-1]}
 }
 
-// rss do servidor em KB (ps funciona no macOS e no Linux).
+// rss do servidor em KB.
 func rss() int64 {
 	if *pid == 0 {
 		return 0
@@ -418,6 +436,32 @@ func rss() int64 {
 	}
 	v, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
 	return v
+}
+
+func cpuTime() time.Duration {
+	if *pid == 0 {
+		return 0
+	}
+	out, err := exec.Command("ps", "-o", "time=", "-p", strconv.Itoa(*pid)).Output() // #nosec G204 -- pid numérico
+	if err != nil {
+		fail("ps do pid %d: %v", *pid, err)
+	}
+	return parseCPU(strings.TrimSpace(string(out)))
+}
+
+// parseCPU lê o "time" do ps: m:ss.ss (macOS), [dd-]hh:mm:ss (Linux).
+func parseCPU(f string) time.Duration {
+	var days float64
+	if d, rest, ok := strings.Cut(f, "-"); ok {
+		days, _ = strconv.ParseFloat(d, 64)
+		f = rest
+	}
+	var sec float64
+	for _, p := range strings.Split(f, ":") {
+		v, _ := strconv.ParseFloat(p, 64)
+		sec = sec*60 + v
+	}
+	return time.Duration((days*86400 + sec) * float64(time.Second))
 }
 
 func sign(key ed25519.PrivateKey, claims map[string]any) string {

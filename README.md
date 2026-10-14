@@ -38,7 +38,7 @@ Instale `caddy-local-root.crt` só no emulador; só a build debug do app confia 
 | `AUTH_SIGNING_KEY` | — (obrigatória) | seed Ed25519 de 32 bytes em base64 (`openssl rand -base64 32`) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | vazio = login Google desligado | |
 | `PUBLIC_URL` | — | `https://<host>` visto pelo navegador (redirect do Google) |
-| `CLUSTER` | vazio = uma instância | `1` = várias instâncias atrás do mesmo Redis (repasse do WS por pub/sub) |
+| `CLUSTER` | vazio = uma instância | `1` = várias instâncias atrás do mesmo Redis (repasse do WS por pub/sub). Cada instância abre até 32 conexões no Postgres (`pool_max_conns` no `DATABASE_URL` muda): instâncias × pool < `max_connections` (100 por padrão) |
 | `ADDR` | `:8080` | endereço HTTP interno |
 | `GOMEMLIMIT` | `512MiB` no compose | teto de memória do runtime |
 
