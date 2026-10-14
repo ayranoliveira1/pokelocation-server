@@ -377,6 +377,18 @@ func TestFetchConcurrent(t *testing.T) {
 		readers[i] = e.user()
 		e.friends(readers[i], a)
 	}
+	// abre as conexões antes: senão abrir conexão demora mais que a transação e as leituras acabam em fila
+	conns := make([]*pgxpool.Conn, len(readers))
+	for i := range conns {
+		c, err := e.pool.Acquire(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns[i] = c
+	}
+	for _, c := range conns {
+		c.Release()
+	}
 	var (
 		mu      sync.Mutex
 		ecIDs   = map[int]int{}
@@ -477,4 +489,24 @@ func TestDeadline(t *testing.T) {
 	e.want(a, "GET", "/v1/keys/count", nil, 503, "unavailable")
 	e.want(a, "PUT", "/v1/keys", mkBundle(ec(), 0, 1, 0, 1).json(), 503, "unavailable")
 	e.want(a, "GET", "/v1/keys/"+nobody, nil, 503, "unavailable")
+}
+
+// Membro de um grupo em comum também lê as chaves (abre a sessão 1:1 que leva a sender key do grupo), sem bloqueio.
+func TestFetchGroupMember(t *testing.T) {
+	e := newEnv(t)
+	a, b, c := e.user(), e.user(), e.user()
+	e.put(a, mkBundle(ec(), 1, 5, 1, 5))
+	var g string
+	if err := e.pool.QueryRow(context.Background(), `INSERT INTO groups (owner_id) VALUES ($1) RETURNING id`, a).Scan(&g); err != nil {
+		t.Fatal(err)
+	}
+	e.exec(`INSERT INTO group_members (group_id, user_id) VALUES ($1, $2), ($1, $3)`, g, a, b)
+
+	e.fetch(b, a) // não são amigos, mas estão no mesmo grupo
+	e.want(c, "GET", "/v1/keys/"+a, nil, 403, "forbidden")
+	e.exec(`INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2)`, a, b)
+	e.want(b, "GET", "/v1/keys/"+a, nil, 403, "forbidden")
+	e.exec(`DELETE FROM blocks`)
+	e.exec(`DELETE FROM group_members WHERE user_id = $1`, b) // saiu do grupo
+	e.want(b, "GET", "/v1/keys/"+a, nil, 403, "forbidden")
 }

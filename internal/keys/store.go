@@ -28,9 +28,12 @@ const (
 		ON CONFLICT (user_id, kind, key_id) DO NOTHING`
 	qCount = `SELECT count(*) FILTER (WHERE kind = 'ec'), count(*) FILTER (WHERE kind = 'kyber')
 		FROM one_time_prekeys WHERE user_id = $1`
-	qCanFetch = `SELECT EXISTS (SELECT 1 FROM friendships WHERE status = 'accepted'
+	// amigo aceito ou membro de um grupo em comum (§4), sem bloqueio em nenhum sentido
+	qCanFetch = `SELECT (EXISTS (SELECT 1 FROM friendships WHERE status = 'accepted'
 				AND least(requester_id, addressee_id) = least($1::uuid, $2::uuid)
 				AND greatest(requester_id, addressee_id) = greatest($1::uuid, $2::uuid))
+			OR EXISTS (SELECT 1 FROM group_members a JOIN group_members b ON b.group_id = a.group_id
+				WHERE a.user_id = $1 AND b.user_id = $2))
 			AND NOT EXISTS (SELECT 1 FROM blocks
 				WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1))`
 	qDevice = `SELECT registration_id, identity_key, signed_prekey_id, signed_prekey, signed_prekey_sig,
