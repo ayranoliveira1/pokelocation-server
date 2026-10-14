@@ -27,6 +27,16 @@ func TestMigrate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if p, err := Open(ctx, url+"&statement_timeout=1500"); err != nil {
+		t.Fatal(err)
+	} else {
+		var got string
+		_ = p.QueryRow(ctx, "SHOW statement_timeout").Scan(&got)
+		p.Close()
+		if got != "1500ms" {
+			t.Errorf("statement_timeout do DSN ignorado: %q", got)
+		}
+	}
 	pool, err := Open(ctx, url)
 	if err != nil {
 		t.Fatal(err)

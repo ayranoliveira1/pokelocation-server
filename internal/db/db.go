@@ -40,8 +40,12 @@ func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 		cfg.MaxConns = maxConns
 	}
 	rp := cfg.ConnConfig.RuntimeParams
-	rp["statement_timeout"] = statementTimeout
-	rp["idle_in_transaction_session_timeout"] = idleInTxTimeout
+	for k, v := range map[string]string{"statement_timeout": statementTimeout,
+		"idle_in_transaction_session_timeout": idleInTxTimeout} {
+		if _, ok := rp[k]; !ok { // o DSN tem precedência
+			rp[k] = v
+		}
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -54,17 +58,20 @@ func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 }
 
 // Migrate aplica as migrations/NNNN_nome.sql acima da versão em schema_version, todas numa transação só.
+// ponytail: por isso CREATE INDEX vai sem CONCURRENTLY e trava escrita na tabela durante a construção; ok sem
+// produção. Com dados reais, índice novo vai como CONCURRENTLY, fora desta transação.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	files, err := fs.Glob(migrations, "migrations/*.sql") // ordem lexical = numérica (4 dígitos)
 	if err != nil {
 		return err
 	}
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockID); err != nil {
+		// antes do lock: criar índice em tabela grande passa do statement_timeout, e a instância que espera o lock
+		// esperaria o mesmo tempo
+		if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = 0`); err != nil {
 			return err
 		}
-		// criar índice em tabela grande passa do statement_timeout do pool
-		if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = 0`); err != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_version (
