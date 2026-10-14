@@ -38,6 +38,7 @@ Instale `caddy-local-root.crt` só no emulador; só a build debug do app confia 
 | `AUTH_SIGNING_KEY` | — (obrigatória) | seed Ed25519 de 32 bytes em base64 (`openssl rand -base64 32`) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | vazio = login Google desligado | |
 | `PUBLIC_URL` | — | `https://<host>` visto pelo navegador (redirect do Google) |
+| `FCM_CREDENTIALS` | vazio = push falso (só loga `fcm ping`) | caminho do JSON da conta de serviço do Firebase (deploy) |
 | `LOG_REQUESTS` | vazio = desligado | `1` = log de cada requisição (método, rota sem query, status, ms), só para depurar no local |
 | `PPROF_ADDR` | vazio = desligado | endereço **interno** do pprof (ex.: `127.0.0.1:6060`) |
 | `CLUSTER` | vazio = uma instância | `1` = várias instâncias atrás do mesmo Redis (repasse do WS por pub/sub). Cada instância abre até 32 conexões no Postgres (`pool_max_conns` no `DATABASE_URL` muda): instâncias × pool < `max_connections` (100 por padrão) |

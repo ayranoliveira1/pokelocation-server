@@ -376,7 +376,10 @@ func (h *Hub) reloadLocal(id string) {
 	}
 }
 
-var errRevoked = errors.New("relay: token revogado")
+var (
+	errRevoked = errors.New("relay: token revogado")
+	errNoName  = errors.New("relay: conta sem @nome")
+)
 
 // session: a consulta única do Auth, depois do register e sob u.reload (como o reload). Recusa o token se a versão
 // dele não é a atual; devolve o corte do backlog.
@@ -385,12 +388,15 @@ func (h *Hub) session(u *user, id string, version int) (int64, error) {
 	defer u.reload.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), h.dbWait)
 	defer cancel()
-	current, cutoff, friends, coMembers, err := h.store.session(ctx, id)
+	current, named, cutoff, friends, coMembers, err := h.store.session(ctx, id)
 	if errors.Is(err, errNoUser) || err == nil && current != version {
 		return 0, errRevoked
 	}
 	if err != nil {
 		return 0, err
+	}
+	if !named {
+		return 0, errNoName
 	}
 	u.setCircle(friends, coMembers)
 	return cutoff, nil

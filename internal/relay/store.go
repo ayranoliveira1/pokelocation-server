@@ -26,7 +26,7 @@ const (
 		VALUES ($1, $2, $3, $4) ON CONFLICT (sender_id, recipient_id, client_msg_id) DO NOTHING`
 	qAck     = `DELETE FROM envelopes WHERE recipient_id = $1 AND sender_id = $2 AND client_msg_id = $3`
 	qAckIDs  = `DELETE FROM envelopes WHERE recipient_id = $1 AND id = ANY($2)`
-	qSession = `SELECT u.token_version,
+	qSession = `SELECT u.token_version, u.username IS NOT NULL,
 			(SELECT coalesce(max(e.id), 0) FROM envelopes e WHERE e.recipient_id = u.id),
 			ARRAY(SELECT (CASE WHEN f.requester_id = u.id THEN f.addressee_id ELSE f.requester_id END)::text
 				FROM friendships f
@@ -95,15 +95,15 @@ func (s *Store) ackIDs(ctx context.Context, recipient string, ids []int64) error
 var errNoUser = errors.New("relay: usuário não existe")
 
 // session lê, num snapshot só, a versão dos tokens, o corte do backlog e os amigos (o Auth do WS).
-func (s *Store) session(ctx context.Context, user string) (version int, cutoff int64, friends, coMembers []string,
-	err error) {
-	err = s.pool.QueryRow(ctx, qSession, user, maxFriendsRead, maxGroupContacts).Scan(&version, &cutoff, &friends,
-		&coMembers)
+func (s *Store) session(ctx context.Context, user string) (version int, named bool, cutoff int64, friends,
+	coMembers []string, err error) {
+	err = s.pool.QueryRow(ctx, qSession, user, maxFriendsRead, maxGroupContacts).Scan(&version, &named, &cutoff,
+		&friends, &coMembers)
 	var pg *pgconn.PgError
 	if errors.Is(err, pgx.ErrNoRows) || errors.As(err, &pg) && pg.Code == "22P02" {
 		err = errNoUser
 	}
-	return version, cutoff, friends, coMembers, err
+	return version, named, cutoff, friends, coMembers, err
 }
 
 func (s *Store) page(ctx context.Context, recipient string, after, upTo int64, limit int) ([]queuedEnvelope, error) {

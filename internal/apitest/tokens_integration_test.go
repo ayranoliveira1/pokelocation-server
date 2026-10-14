@@ -136,7 +136,8 @@ func TestLogin(t *testing.T) {
 	l := s.do("POST", "/v1/auth/login", "", map[string]string{"email": " " + strings.ToUpper(a.email) + " ", "password": a.password})
 	s.want(l, 200, "")
 	s.secret(l.str("access_token"), l.str("refresh_token"))
-	s.want(s.do("POST", "/v1/auth/register", "", map[string]string{"email": strings.ToUpper(a.email), "password": "outra-senha-1"}), 409, "email_taken")
+	s.want(s.do("POST", "/v1/auth/register", "", map[string]string{"email": strings.ToUpper(a.email), "password": "outra-senha-1",
+		"username": newUsername("dup")}), 409, "email_taken")
 }
 
 func TestRegisterValida(t *testing.T) {
@@ -151,7 +152,8 @@ func TestRegisterValida(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := s.on(t)
-			var body any = map[string]string{"email": c.email, "password": c.password}
+			// @nome válido: cada caso testa só o próprio campo.
+			var body any = map[string]string{"email": c.email, "password": c.password, "username": newUsername("v")}
 			if c.code == "bad_request" {
 				body = `{"email":`
 			}

@@ -23,6 +23,8 @@ import (
 	"google.golang.org/api/idtoken"
 
 	"github.com/ayranoliveira1/pokelocation-server/internal/groups"
+	"github.com/ayranoliveira1/pokelocation-server/internal/ratelimit"
+	"github.com/ayranoliveira1/pokelocation-server/internal/username"
 )
 
 const (
@@ -48,15 +50,20 @@ type apiError struct {
 func (e *apiError) Error() string { return e.code }
 
 var (
-	errBadRequest   = &apiError{400, "bad_request"}
-	errInvalidEmail = &apiError{400, "invalid_email"}
-	errWeakPassword = &apiError{400, "weak_password"}
-	errEmailTaken   = &apiError{409, "email_taken"}
-	errInvalidCreds = &apiError{401, "invalid_credentials"}
-	errUnauthorized = &apiError{401, "unauthorized"}
-	errInvalidGrant = &apiError{400, "invalid_grant"}
-	errBadState     = errors.New("auth: state desconhecido")
-	errArgonBusy    = errors.New("auth: argon2 sem vaga")
+	errBadRequest       = &apiError{400, "bad_request"}
+	errInvalidEmail     = &apiError{400, "invalid_email"}
+	errWeakPassword     = &apiError{400, "weak_password"}
+	errEmailTaken       = &apiError{409, "email_taken"}
+	errInvalidCreds     = &apiError{401, "invalid_credentials"}
+	errUnauthorized     = &apiError{401, "unauthorized"}
+	errInvalidGrant     = &apiError{400, "invalid_grant"}
+	errInvalidUsername  = &apiError{400, "invalid_username"}
+	errUsernameReserved = &apiError{400, "username_reserved"}
+	errUsernameTaken    = &apiError{409, "username_taken"}
+	errUsernameRequired = &apiError{403, "username_required"}
+	errRateLimited      = &apiError{429, "rate_limited"}
+	errBadState         = errors.New("auth: state desconhecido")
+	errArgonBusy        = errors.New("auth: argon2 sem vaga")
 
 	ErrUnauthorized error = errUnauthorized
 )
@@ -83,6 +90,10 @@ type Service struct {
 	dummy  string        // login sem conta compara com este hash: o tempo de resposta não revela se o email existe
 	argon  chan struct{} // 19 MiB por hash: o teto de hashes simultâneos impede uma rajada de logins de estourar a RAM
 	notify func(user string, exFriends []string, groupChanges []groups.Change)
+	// names: trocas de @nome, 5 por dia.
+	// ponytail: em memória e por instância; um restart ou outra instância zera a contagem do dia. Contar no banco
+	// (ex.: users.username_changed_at + contagem) se aparecer abuso.
+	names *ratelimit.Limiter
 	// google é campo para o teste trocar a ida ao Google.
 	google func(ctx context.Context, code string) (sub, email string, err error)
 }
@@ -93,7 +104,7 @@ func normEmail(raw string) (string, bool) {
 	return e, len(e) >= 3 && len(e) <= 254 && local != "" && domain != "" && !strings.Contains(domain, "@")
 }
 
-func (s *Service) register(ctx context.Context, email, password string) (tokens, error) {
+func (s *Service) register(ctx context.Context, email, password, rawName string) (tokens, error) {
 	e, ok := normEmail(email)
 	if !ok {
 		return tokens{}, errInvalidEmail
@@ -101,11 +112,15 @@ func (s *Service) register(ctx context.Context, email, password string) (tokens,
 	if n := utf8.RuneCountInString(password); n < 8 || n > 128 {
 		return tokens{}, errWeakPassword
 	}
+	name, err := checkName(rawName)
+	if err != nil {
+		return tokens{}, err
+	}
 	hash, err := s.hashPassword(ctx, password)
 	if err != nil {
 		return tokens{}, err
 	}
-	id, err := s.store.createUser(ctx, &e, &hash, nil)
+	id, err := s.store.createUser(ctx, &e, &hash, nil, &name)
 	if err != nil {
 		return tokens{}, err
 	}
@@ -191,19 +206,50 @@ func (s *Service) parse(token string) (string, time.Time, int, error) {
 	return c.Subject, c.ExpiresAt.Time, *c.TV, nil
 }
 
-func (s *Service) verify(ctx context.Context, token string) (string, time.Time, error) {
-	id, exp, tv, err := s.parse(token)
+func (s *Service) verify(ctx context.Context, token string) (id string, named bool, err error) {
+	id, _, tv, err := s.parse(token)
 	if err != nil {
-		return "", time.Time{}, err
+		return "", false, err
 	}
-	v, err := s.store.version(ctx, id)
+	v, named, err := s.store.version(ctx, id)
 	if errors.Is(err, errNotFound) || err == nil && v != tv {
-		return "", time.Time{}, errUnauthorized
+		return "", false, errUnauthorized
 	}
 	if err != nil {
-		return "", time.Time{}, err
+		return "", false, err
 	}
-	return id, exp, nil
+	return id, named, nil
+}
+
+func checkName(raw string) (string, error) {
+	name, err := username.Check(raw)
+	switch {
+	case errors.Is(err, username.ErrReserved):
+		return "", errUsernameReserved
+	case err != nil:
+		return "", errInvalidUsername
+	}
+	return name, nil
+}
+
+// setUsername: o nome atual de novo não conta no limite; os outros contam antes de gravar (inclusive um já usado,
+// para ninguém varrer nomes trocando o próprio).
+func (s *Service) setUsername(ctx context.Context, user, raw string) error {
+	name, err := checkName(raw)
+	if err != nil {
+		return err
+	}
+	cur, err := s.store.username(ctx, user)
+	if err != nil {
+		return err
+	}
+	if cur != nil && *cur == name {
+		return nil
+	}
+	if !s.names.Allow(user, s.now()) {
+		return errRateLimited
+	}
+	return s.store.setUsername(ctx, user, name)
 }
 
 var b64 = base64.RawStdEncoding
@@ -322,7 +368,7 @@ func (s *Service) googleUser(ctx context.Context, sub, email string) (string, er
 		return "", err
 	}
 	if id == "" {
-		return s.store.createUser(ctx, &email, nil, &sub)
+		return s.store.createUser(ctx, &email, nil, &sub, nil) // Google: o @nome vem depois (PUT /v1/me/username)
 	}
 	if linked != nil {
 		return "", googleError{errors.New("email já vinculado a outra conta Google")}

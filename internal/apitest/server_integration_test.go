@@ -155,7 +155,8 @@ func (s *server) on(t *testing.T) *server {
 	return &c
 }
 
-// need: 404 em texto é do ServeMux (rota ausente), não o not_found em JSON do contrato.
+// need: 404 em texto é do ServeMux (rota ausente), não o not_found em JSON do contrato. Rota do contrato que falta é
+// falha: o main tem de montar todas.
 func (s *server) need(method, path string) {
 	s.t.Helper()
 	req, _ := http.NewRequest(method, s.base+path, nil)
@@ -167,7 +168,7 @@ func (s *server) need(method, path string) {
 	_ = r.Body.Close()
 	if r.StatusCode == 404 && strings.HasPrefix(string(b), "404 page not found") ||
 		r.StatusCode == 405 && strings.HasPrefix(string(b), "Method Not Allowed") {
-		s.t.Skipf("rota %s %s ainda não existe", method, path)
+		s.t.Fatalf("rota do contrato não montada: %s %s", method, path)
 	}
 }
 

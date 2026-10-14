@@ -61,6 +61,7 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		rdb:   rdb,
 		cfg:   cfg,
 		argon: make(chan struct{}, 2*runtime.NumCPU()),
+		names: ratelimit.NewWindow(5, 24*time.Hour),
 	}
 	s.google = s.googleIdentity
 	h := &Handler{svc: s, ip: ratelimit.New(5), email: ratelimit.New(5), reqWait: reqWait}
@@ -97,6 +98,7 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	mux.HandleFunc("GET /v1/auth/google/callback", httpx.Timed(googleWait, h.googleCallback))
 	mux.HandleFunc("POST /v1/auth/google/exchange", httpx.Timed(d, h.googleExchange))
 	mux.Handle("GET /v1/me", authed(httpx.Timed(d, h.me)))
+	mux.Handle("PUT /v1/me/username", authed(httpx.Timed(d, h.putUsername)))
 }
 
 // Cleanup apaga os refresh tokens vencidos.
@@ -109,7 +111,13 @@ func (h *Handler) ParseAccess(token string) (userID string, exp time.Time, versi
 }
 
 // Authed exige um Bearer válido e põe o id do usuário no contexto (httpx.User).
-func (h *Handler) Authed(next http.HandlerFunc) http.Handler {
+func (h *Handler) Authed(next http.HandlerFunc) http.Handler { return h.authed(false, next) }
+
+// AuthedNamed: o Authed mais o @nome (403 username_required sem ele), na mesma leitura por PK. Para amigos, chaves,
+// grupos, fila, posições e FCM; as rotas do próprio auth ficam com o Authed.
+func (h *Handler) AuthedNamed(next http.HandlerFunc) http.Handler { return h.authed(true, next) }
+
+func (h *Handler) authed(needName bool, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
 		if !strings.EqualFold(scheme, "Bearer") {
@@ -117,8 +125,11 @@ func (h *Handler) Authed(next http.HandlerFunc) http.Handler {
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), h.reqWait)
-		uid, _, err := h.svc.verify(ctx, token)
+		uid, named, err := h.svc.verify(ctx, token)
 		cancel()
+		if err == nil && needName && !named {
+			err = errUsernameRequired
+		}
 		if err != nil {
 			h.fail(w, err)
 			return
@@ -130,6 +141,7 @@ func (h *Handler) Authed(next http.HandlerFunc) http.Handler {
 type credentials struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	Username string `json:"username"` // só no register
 }
 
 type refreshBody struct {
@@ -141,7 +153,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	if !httpx.Decode(w, r, maxBody, &in) || !h.allow(w, r, in.Email) {
 		return
 	}
-	t, err := h.svc.register(r.Context(), in.Email, in.Password)
+	t, err := h.svc.register(r.Context(), in.Email, in.Password, in.Username)
 	h.reply(w, http.StatusCreated, t, err)
 }
 
@@ -177,7 +189,7 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	id := httpx.User(r.Context())
-	email, code, err := h.svc.store.me(r.Context(), id)
+	email, code, name, err := h.svc.store.me(r.Context(), id)
 	if errors.Is(err, errNotFound) {
 		err = errUnauthorized // conta apagada com access ainda dentro do prazo
 	}
@@ -189,7 +201,22 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		ID         string  `json:"id"`
 		Email      *string `json:"email"`
 		FriendCode string  `json:"friend_code"`
-	}{id, email, code})
+		Username   *string `json:"username"`
+	}{id, email, code, name})
+}
+
+func (h *Handler) putUsername(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Username string `json:"username"`
+	}
+	if !httpx.Decode(w, r, maxBody, &in) {
+		return
+	}
+	if err := h.svc.setUsername(r.Context(), httpx.User(r.Context()), in.Username); err != nil {
+		h.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // googleStart/googleCallback respondem a um navegador: erro sem como voltar ao app é texto puro.

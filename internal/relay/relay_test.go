@@ -77,8 +77,8 @@ func (e *env) user() string {
 	var id string
 	n := codeSeq.Add(1)
 	code := fmt.Sprintf("%08d", n)
-	if err := e.pool.QueryRow(context.Background(), `INSERT INTO users (email, friend_code) VALUES ($1, $2) RETURNING id`,
-		fmt.Sprintf("u%d@ex.com", n), code).Scan(&id); err != nil {
+	if err := e.pool.QueryRow(context.Background(), `INSERT INTO users (email, friend_code, username) VALUES ($1, $2, $3)
+		RETURNING id`, fmt.Sprintf("u%d@ex.com", n), code, fmt.Sprintf("user%d", n)).Scan(&id); err != nil {
 		e.t.Fatal(err)
 	}
 	return id
@@ -954,4 +954,17 @@ func TestPushOnlyOffline(t *testing.T) {
 	if fmt.Sprint(pinged) != fmt.Sprint([]string{off}) {
 		t.Fatalf("push: %v", pinged)
 	}
+}
+
+// Conta sem @nome (1º login Google) não abre o WS: o app pede o nome antes (§8).
+func TestUsernameRequired(t *testing.T) {
+	e := newEnv(t)
+	a := e.user()
+	if _, err := e.pool.Exec(context.Background(), `UPDATE users SET username = NULL WHERE id = $1`, a); err != nil {
+		t.Fatal(err)
+	}
+	c := e.connect(a)
+	c.wantError("username_required")
+	c.wantClose(websocket.ClosePolicyViolation)
+	e.waitOnline(a, 0)
 }

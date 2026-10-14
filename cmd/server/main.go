@@ -23,8 +23,10 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/auth"
 	"github.com/ayranoliveira1/pokelocation-server/internal/db"
 	"github.com/ayranoliveira1/pokelocation-server/internal/friends"
+	"github.com/ayranoliveira1/pokelocation-server/internal/groups"
 	"github.com/ayranoliveira1/pokelocation-server/internal/keys"
 	"github.com/ayranoliveira1/pokelocation-server/internal/location"
+	"github.com/ayranoliveira1/pokelocation-server/internal/push"
 	"github.com/ayranoliveira1/pokelocation-server/internal/relay"
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
@@ -33,6 +35,7 @@ type config struct {
 	addr, databaseURL, redisURL string
 	pprofAddr                   string
 	logRequests                 bool
+	fcmCredentials              string
 	cluster                     bool
 	auth                        auth.Config
 }
@@ -45,6 +48,8 @@ func loadConfig() (config, error) {
 		pprofAddr:   os.Getenv("PPROF_ADDR"),
 		cluster:     os.Getenv("CLUSTER") == "1",
 		logRequests: os.Getenv("LOG_REQUESTS") == "1",
+		// vazio = envio falso (só registra o ping no log), como nos testes e no local
+		fcmCredentials: os.Getenv("FCM_CREDENTIALS"),
 		auth: auth.Config{
 			SigningKey:         os.Getenv("AUTH_SIGNING_KEY"),
 			GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
@@ -111,6 +116,17 @@ func run() error {
 	authH.OnRevoke = hub.Kick
 	fh := friends.New(pool)
 	fh.OnChange = reload
+	gh := groups.New(pool)
+	gh.OnChange = hub.GroupChanged
+	authH.OnGroupsChange = hub.GroupChanged
+
+	sender, err := push.NewSender(ctx, cfg.fcmCredentials)
+	if err != nil {
+		return err
+	}
+	pushSvc := push.New(pool, sender)
+	hub.Notify = pushSvc.Notify
+	go pushSvc.Run(ctx)
 
 	go daily(ctx, "auth: limpeza dos refresh", authH.Cleanup)
 	go daily(ctx, "relay: envelopes > 30 dias", hub.Cleanup)
@@ -118,11 +134,15 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", healthz(pool))
+	// /v1/me e PUT /v1/me/username ficam livres; o resto exige o @nome (docs/api.md §8)
 	authH.Routes(mux, authH.Authed)
-	fh.Routes(mux, authH.Authed)
-	keys.New(pool).Routes(mux, authH.Authed)
-	hub.Routes(mux, authH.Authed)
-	loc.Routes(mux, authH.Authed)
+	named := authH.AuthedNamed
+	fh.Routes(mux, named)
+	keys.New(pool).Routes(mux, named)
+	hub.Routes(mux, named)
+	loc.Routes(mux, named)
+	gh.Routes(mux, named)
+	push.NewHandler(pool).Routes(mux, named)
 
 	srv := &http.Server{
 		Addr:              cfg.addr,

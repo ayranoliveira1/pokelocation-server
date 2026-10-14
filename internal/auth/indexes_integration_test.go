@@ -37,6 +37,8 @@ func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 		{qDelEnvelopesOfUser, []any{s.User}, [][]string{{"envelopes_recipient"},
 			{"envelopes_sender_id_recipient_id_client_msg_id_key"}}},
 		{qMe, []any{s.User}, [][]string{{"users_pkey"}}},
+		{qUsername, []any{s.User}, [][]string{{"users_pkey"}}},
+		{qSetUsername, []any{s.User, "nome"}, [][]string{{"users_pkey"}}},
 		{qNewRefresh, []any{s.User, s.TokenHash, now}, [][]string{{"users_pkey"}}},
 		{qRefreshOwner, []any{s.TokenHash}, [][]string{{"refresh_tokens_token_hash_key"}}},
 		{qLockUser, []any{s.User}, [][]string{{"users_pkey"}}},

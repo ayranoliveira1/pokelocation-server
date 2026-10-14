@@ -34,6 +34,7 @@ services:
       # abaixo do pico vivo o GC roda sem parar (15 mil conexões com 512MiB: 5 núcleos só de GC)
       GOMEMLIMIT: ${GOMEMLIMIT:-1GiB}
       LOG_REQUESTS: ${LOG_REQUESTS:-}
+      FCM_CREDENTIALS: ${FCM_CREDENTIALS:-}
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_started}

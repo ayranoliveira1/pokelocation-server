@@ -18,11 +18,11 @@ type Store struct {
 }
 
 const (
-	qInsertUser = `INSERT INTO users (email, password_hash, google_sub, friend_code)
-			VALUES ($1, $2, $3, $4) RETURNING id`
+	qInsertUser = `INSERT INTO users (email, password_hash, google_sub, friend_code, username)
+			VALUES ($1, $2, $3, $4, $5) RETURNING id`
 	qUserByEmail = `SELECT id, password_hash, google_sub FROM users WHERE email = $1`
 	qUserBySub   = `SELECT id FROM users WHERE google_sub = $1`
-	qVersion     = `SELECT token_version FROM users WHERE id = $1`
+	qVersion     = `SELECT token_version, username IS NOT NULL FROM users WHERE id = $1`
 	qLinkUser    = `UPDATE users SET google_sub = $2, password_hash = NULL,
 			token_version = token_version + 1 WHERE id = $1 AND google_sub IS NULL`
 	qLinkFriendships = `DELETE FROM friendships WHERE requester_id = $1 OR addressee_id = $1
@@ -32,7 +32,9 @@ const (
 	qDelDeviceOfUser    = `DELETE FROM devices WHERE user_id = $1`
 	qDelPrekeysOfUser   = `DELETE FROM one_time_prekeys WHERE user_id = $1`
 	qDelEnvelopesOfUser = `DELETE FROM envelopes WHERE recipient_id = $1 OR sender_id = $1`
-	qMe                 = `SELECT email, friend_code FROM users WHERE id = $1`
+	qMe                 = `SELECT email, friend_code, username FROM users WHERE id = $1`
+	qUsername           = `SELECT username FROM users WHERE id = $1`
+	qSetUsername        = `UPDATE users SET username = $2 WHERE id = $1`
 	qNewRefresh         = `WITH r AS (
 			INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
 			VALUES ($1, gen_random_uuid(), $2, $3))
@@ -60,14 +62,17 @@ func uniqueViolation(err error, constraint string) bool {
 	return errors.As(err, &pg) && pg.Code == "23505" && pg.ConstraintName == constraint
 }
 
-// createUser: nil = NULL.
-func (s *Store) createUser(ctx context.Context, email, hash, sub *string) (string, error) {
+// createUser: nil = NULL. Email e @nome únicos no mesmo INSERT.
+func (s *Store) createUser(ctx context.Context, email, hash, sub, username *string) (string, error) {
 	var id string
 	var err error
 	for range 5 { // colisão em 32^8 é raríssima; o teto só evita laço infinito
-		err = s.pool.QueryRow(ctx, qInsertUser, email, hash, sub, friends.NewCode()).Scan(&id)
+		err = s.pool.QueryRow(ctx, qInsertUser, email, hash, sub, friends.NewCode(), username).Scan(&id)
 		if uniqueViolation(err, "users_email_key") {
 			return "", errEmailTaken
+		}
+		if uniqueViolation(err, "users_username_key") {
+			return "", errUsernameTaken
 		}
 		if !uniqueViolation(err, "users_friend_code_key") {
 			break
@@ -96,14 +101,14 @@ func (s *Store) userBySub(ctx context.Context, sub string) (string, error) {
 }
 
 // version: id que nem é uuid também é errNotFound (o sub vem do token, não do banco).
-func (s *Store) version(ctx context.Context, id string) (int, error) {
-	var v int
-	err := s.pool.QueryRow(ctx, qVersion, id).Scan(&v)
+// version: a leitura por PK de toda requisição autenticada; named (tem @nome) vem junto, sem consulta a mais.
+func (s *Store) version(ctx context.Context, id string) (v int, named bool, err error) {
+	err = s.pool.QueryRow(ctx, qVersion, id).Scan(&v, &named)
 	var pg *pgconn.PgError
 	if errors.Is(err, pgx.ErrNoRows) || errors.As(err, &pg) && pg.Code == "22P02" {
-		return v, errNotFound
+		return v, false, errNotFound
 	}
-	return v, err
+	return v, named, err
 }
 
 // linkGoogle entrega a conta limpa: nada que o dono antigo do email deixou (senha, sessões, amigos, chaves, fila)
@@ -154,12 +159,26 @@ func (s *Store) linkGoogle(ctx context.Context, id, sub string) (bool, []string,
 	return ok, ex, changes, nil
 }
 
-func (s *Store) me(ctx context.Context, id string) (email *string, code string, err error) {
-	err = s.pool.QueryRow(ctx, qMe, id).Scan(&email, &code)
+func (s *Store) me(ctx context.Context, id string) (email *string, code string, username *string, err error) {
+	err = s.pool.QueryRow(ctx, qMe, id).Scan(&email, &code, &username)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = errNotFound
 	}
-	return email, code, err
+	return email, code, username, err
+}
+
+func (s *Store) username(ctx context.Context, id string) (*string, error) {
+	var u *string
+	err := s.pool.QueryRow(ctx, qUsername, id).Scan(&u)
+	return u, err
+}
+
+func (s *Store) setUsername(ctx context.Context, id, username string) error {
+	_, err := s.pool.Exec(ctx, qSetUsername, id, username)
+	if uniqueViolation(err, "users_username_key") {
+		return errUsernameTaken
+	}
+	return err
 }
 
 // newRefresh: família nova (um login).

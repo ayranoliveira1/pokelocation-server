@@ -424,6 +424,10 @@ func (c *Conn) auth() bool {
 		c.kill(websocket.ClosePolicyViolation, "unauthorized")
 		return false
 	}
+	if errors.Is(err, errNoName) {
+		c.kill(websocket.ClosePolicyViolation, "username_required")
+		return false
+	}
 	if err != nil {
 		logDB("relay: auth", err)
 		c.kill(websocket.CloseInternalServerErr, "") // banco fora: o app reconecta com espera

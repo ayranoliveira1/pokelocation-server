@@ -72,8 +72,15 @@ func (e *env) post(path, body string) *httptest.ResponseRecorder {
 	return e.req("POST", path, body, "")
 }
 
+var nameSeq atomic.Int32
+
+// cred: com um @nome novo a cada chamada (o cadastro exige; o login ignora).
 func cred(email, pw string) string {
-	b, _ := json.Marshal(map[string]string{"email": email, "password": pw})
+	return credName(email, pw, fmt.Sprintf("user%d", nameSeq.Add(1)))
+}
+
+func credName(email, pw, username string) string {
+	b, _ := json.Marshal(map[string]string{"email": email, "password": pw, "username": username})
 	return string(b)
 }
 
@@ -114,6 +121,7 @@ type me struct {
 	ID         string  `json:"id"`
 	Email      *string `json:"email"`
 	FriendCode string  `json:"friend_code"`
+	Username   *string `json:"username"`
 }
 
 func (e *env) me(access string) me {
@@ -919,5 +927,104 @@ func TestLinkLeavesGroups(t *testing.T) {
 	}
 	if fmt.Sprint(got[alone]) != fmt.Sprint([]string{id}) {
 		t.Errorf("aviso de %s: %v", alone, got[alone])
+	}
+}
+
+// ---- @nome (§8) ----
+
+func TestRegisterUsername(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	tr := wantTokens(t, e.post("/v1/auth/register", credName("nome1@ex.com", "senha-forte-1", "  Ana_1 ")), 201)
+	if m := e.me(tr.Access); m.Username == nil || *m.Username != "ana_1" {
+		t.Fatalf("me: %+v", m)
+	}
+	wantErr(t, e.post("/v1/auth/register", credName("nome2@ex.com", "senha-forte-1", "ANA_1")), 409, "username_taken")
+	wantErr(t, e.post("/v1/auth/register", credName("nome3@ex.com", "senha-forte-1", "Admin")), 400, "username_reserved")
+	wantErr(t, e.post("/v1/auth/register", credName("nome4@ex.com", "senha-forte-1", "9ana")), 400, "invalid_username")
+	wantErr(t, e.post("/v1/auth/register", `{"email":"nome5@ex.com","password":"senha-forte-1"}`), 400, "invalid_username")
+	wantErr(t, e.post("/v1/auth/register", credName("nome1@ex.com", "senha-forte-1", "outro_nome")), 409, "email_taken")
+}
+
+func TestGoogleWithoutUsername(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.h.svc.google = fakeGoogle
+	v, ch := pkce()
+	back := e.googleCallback("sub-semnome|semnome@ex.com", ch, "app-state-semnome1")
+	tr := wantTokens(t, e.exchange(back.Query().Get("code"), v), 200)
+	if m := e.me(tr.Access); m.Username != nil {
+		t.Fatalf("conta Google nasceu com @nome: %q", *m.Username)
+	}
+}
+
+func (e *env) putName(access, name string) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(map[string]string{"username": name})
+	return e.req("PUT", "/v1/me/username", string(b), access)
+}
+
+func TestPutUsername(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	t0 := time.Now() // relógio parado: o limite é por dia
+	e.h.svc.now = func() time.Time { return t0 }
+	a := wantTokens(t, e.post("/v1/auth/register", credName("pa@ex.com", "senha-forte-1", "alfa")), 201)
+	b := wantTokens(t, e.post("/v1/auth/register", credName("pb@ex.com", "senha-forte-1", "beta")), 201)
+
+	if w := e.putName(a.Access, "Gama"); w.Code != 204 {
+		t.Fatalf("troca: %d %s", w.Code, w.Body.String())
+	}
+	if m := e.me(a.Access); m.Username == nil || *m.Username != "gama" {
+		t.Fatalf("me: %+v", m)
+	}
+	if w := e.putName(b.Access, "alfa"); w.Code != 204 { // o nome antigo fica livre na hora
+		t.Fatalf("nome liberado: %d %s", w.Code, w.Body.String())
+	}
+	for range 6 {
+		if w := e.putName(a.Access, "gama"); w.Code != 204 { // o mesmo nome não conta
+			t.Fatalf("mesmo nome: %d", w.Code)
+		}
+	}
+	wantErr(t, e.putName(a.Access, "alfa"), 409, "username_taken")
+	wantErr(t, e.putName(a.Access, "x"), 400, "invalid_username")
+	wantErr(t, e.putName(a.Access, "root"), 400, "username_reserved")
+	for i := range 3 { // gama + o 409 acima já contaram 2 de 5
+		if w := e.putName(a.Access, fmt.Sprintf("nome%d", i)); w.Code != 204 {
+			t.Fatalf("troca %d: %d %s", i, w.Code, w.Body.String())
+		}
+	}
+	wantErr(t, e.putName(a.Access, "mais_um"), 429, "rate_limited")
+	wantErr(t, e.req("PUT", "/v1/me/username", `{"username":"zeta"}`, ""), 401, "unauthorized")
+}
+
+// AuthedNamed: o Authed mais o @nome, na mesma leitura por PK; as rotas de amigos, chat etc. passam por ele.
+func TestAuthedNamed(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.h.svc.google = fakeGoogle
+	ok := e.h.AuthedNamed(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	call := func(access string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/x", nil)
+		if access != "" {
+			r.Header.Set("Authorization", "Bearer "+access)
+		}
+		w := httptest.NewRecorder()
+		ok.ServeHTTP(w, r)
+		return w
+	}
+	named := e.register("comnome@ex.com")
+	if w := call(named.Access); w.Code != 204 {
+		t.Fatalf("com @nome: %d", w.Code)
+	}
+	v, ch := pkce()
+	back := e.googleCallback("sub-x|semnome2@ex.com", ch, "app-state-semnome2")
+	g := wantTokens(t, e.exchange(back.Query().Get("code"), v), 200)
+	wantErr(t, call(g.Access), 403, "username_required")
+	wantErr(t, call(""), 401, "unauthorized")
+	if w := e.putName(g.Access, "agora_tem"); w.Code != 204 { // PUT /v1/me/username fica livre
+		t.Fatalf("pôr @nome: %d %s", w.Code, w.Body.String())
+	}
+	if w := call(g.Access); w.Code != 204 {
+		t.Fatalf("depois do @nome: %d", w.Code)
 	}
 }
