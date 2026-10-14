@@ -1,7 +1,6 @@
 package keys
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -89,9 +88,9 @@ type Handler struct {
 func New(pool *pgxpool.Pool) *Handler { return &Handler{NewStore(pool), ratelimit.New(10), reqWait} }
 
 func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
-	mux.Handle("PUT /v1/keys", authed(h.timed(h.put)))
-	mux.Handle("GET /v1/keys/count", authed(h.timed(h.count)))
-	mux.Handle("GET /v1/keys/{userId}", authed(h.timed(h.fetch)))
+	mux.Handle("PUT /v1/keys", authed(httpx.Timed(h.reqWait, h.put)))
+	mux.Handle("GET /v1/keys/count", authed(httpx.Timed(h.reqWait, h.count)))
+	mux.Handle("GET /v1/keys/{userId}", authed(httpx.Timed(h.reqWait, h.fetch)))
 }
 
 func (h *Handler) put(w http.ResponseWriter, r *http.Request) {
@@ -136,15 +135,6 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, f)
-}
-
-// timed: prazo da requisição inteira; o statement_timeout do pool é só a rede de segurança.
-func (h *Handler) timed(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), h.reqWait)
-		defer cancel()
-		next(w, r.WithContext(ctx))
-	}
 }
 
 func fail(w http.ResponseWriter, err error) {

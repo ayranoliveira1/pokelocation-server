@@ -461,6 +461,8 @@ func TestDeadline(t *testing.T) {
 	e := newEnv(t)
 	a := e.user()
 	e.h.reqWait = time.Nanosecond
+	e.mux = http.NewServeMux() // o prazo entra no registro das rotas
+	e.h.Routes(e.mux, func(h http.HandlerFunc) http.Handler { return h })
 	e.want(a, "GET", "/v1/friends", "", 503, "unavailable")
 	e.want(a, "POST", "/v1/blocks/"+nobody, "", 503, "unavailable")
 }

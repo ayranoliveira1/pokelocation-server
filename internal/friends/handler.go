@@ -1,7 +1,6 @@
 package friends
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -25,13 +24,13 @@ func New(pool *pgxpool.Pool) *Handler {
 }
 
 func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
-	mux.Handle("GET /v1/friends", authed(h.timed(h.list)))
-	mux.Handle("POST /v1/friends/requests", authed(h.timed(h.request)))
-	mux.Handle("POST /v1/friends/requests/{id}/accept", authed(h.timed(h.accept)))
-	mux.Handle("POST /v1/friends/requests/{id}/decline", authed(h.timed(h.decline)))
-	mux.Handle("DELETE /v1/friends/{userId}", authed(h.timed(h.remove)))
-	mux.Handle("POST /v1/blocks/{userId}", authed(h.timed(h.block)))
-	mux.Handle("DELETE /v1/blocks/{userId}", authed(h.timed(h.unblock)))
+	mux.Handle("GET /v1/friends", authed(httpx.Timed(h.reqWait, h.list)))
+	mux.Handle("POST /v1/friends/requests", authed(httpx.Timed(h.reqWait, h.request)))
+	mux.Handle("POST /v1/friends/requests/{id}/accept", authed(httpx.Timed(h.reqWait, h.accept)))
+	mux.Handle("POST /v1/friends/requests/{id}/decline", authed(httpx.Timed(h.reqWait, h.decline)))
+	mux.Handle("DELETE /v1/friends/{userId}", authed(httpx.Timed(h.reqWait, h.remove)))
+	mux.Handle("POST /v1/blocks/{userId}", authed(httpx.Timed(h.reqWait, h.block)))
+	mux.Handle("DELETE /v1/blocks/{userId}", authed(httpx.Timed(h.reqWait, h.unblock)))
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -84,15 +83,6 @@ func (h *Handler) block(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) unblock(w http.ResponseWriter, r *http.Request) {
 	done(w, h.Service.Unblock(r.Context(), httpx.User(r.Context()), r.PathValue("userId")))
-}
-
-// timed: prazo da requisição inteira; o statement_timeout do pool é só a rede de segurança.
-func (h *Handler) timed(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), h.reqWait)
-		defer cancel()
-		next(w, r.WithContext(ctx))
-	}
 }
 
 func done(w http.ResponseWriter, err error) {

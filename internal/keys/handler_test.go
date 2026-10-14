@@ -472,6 +472,8 @@ func TestDeadline(t *testing.T) {
 	e := newEnv(t)
 	a := e.user()
 	e.h.reqWait = time.Nanosecond
+	e.mux = http.NewServeMux() // o prazo entra no registro das rotas
+	e.h.Routes(e.mux, func(h http.HandlerFunc) http.Handler { return h })
 	e.want(a, "GET", "/v1/keys/count", nil, 503, "unavailable")
 	e.want(a, "PUT", "/v1/keys", mkBundle(ec(), 0, 1, 0, 1).json(), 503, "unavailable")
 	e.want(a, "GET", "/v1/keys/"+nobody, nil, 503, "unavailable")
