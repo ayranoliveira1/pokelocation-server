@@ -12,7 +12,6 @@ import (
 
 const maxStored = 200 // one-time guardadas por tipo
 
-// Queries com o plano conferido em indexes_integration_test.go.
 const (
 	qIdentity      = `SELECT identity_key FROM devices WHERE user_id = $1`
 	qDeleteOneTime = `DELETE FROM one_time_prekeys WHERE user_id = $1`
@@ -28,7 +27,6 @@ const (
 		ON CONFLICT (user_id, kind, key_id) DO NOTHING`
 	qCount = `SELECT count(*) FILTER (WHERE kind = 'ec'), count(*) FILTER (WHERE kind = 'kyber')
 		FROM one_time_prekeys WHERE user_id = $1`
-	// amigo aceito ou membro de um grupo em comum (§4), sem bloqueio em nenhum sentido
 	qCanFetch = `SELECT (EXISTS (SELECT 1 FROM friendships WHERE status = 'accepted'
 				AND least(requester_id, addressee_id) = least($1::uuid, $2::uuid)
 				AND greatest(requester_id, addressee_id) = greatest($1::uuid, $2::uuid))

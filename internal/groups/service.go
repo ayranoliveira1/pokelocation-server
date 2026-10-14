@@ -1,4 +1,4 @@
-// Package groups: grupos e membresia (docs/api.md §7). O servidor só conhece dono e membros.
+// Package groups: grupos e membresia (docs/api.md §7).
 package groups
 
 import (
@@ -52,7 +52,6 @@ func (s *Service) changed(group string, users []string) {
 	}
 }
 
-// Create: members sem repetidos e sem o dono antes de contar o teto.
 func (s *Service) Create(ctx context.Context, owner string, members []string) (string, error) {
 	var ms []string
 	for _, m := range members {

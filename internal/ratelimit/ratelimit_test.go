@@ -40,7 +40,6 @@ func TestSweep(t *testing.T) {
 	}
 }
 
-// Janela qualquer (ex.: 5 trocas de @nome por dia): balde de n, recarga de 1 a cada janela/n, varredura após a janela.
 func TestWindow(t *testing.T) {
 	l := NewWindow(5, 24*time.Hour)
 	t0 := time.Unix(1_000_000, 0)

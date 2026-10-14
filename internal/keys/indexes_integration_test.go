@@ -11,8 +11,7 @@ import (
 func TestIndices(t *testing.T)     { t.Parallel(); checkIndices(t, testdb.Pool(t)) }
 func TestIndicesSeed(t *testing.T) { checkIndices(t, testdb.Seed(t)) }
 
-// Toda leitura do store. qUpsertDevice e qInsertOneTime ficam de fora: INSERT de VALUES/unnest não lê tabela, e o
-// ON CONFLICT usa o índice único pela definição.
+// qUpsertDevice e qInsertOneTime ficam de fora: INSERT de VALUES/unnest não lê tabela.
 func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 	s := testdb.SampleOf(t, pool)
 	const unique = "one_time_prekeys_user_id_kind_key_id_key"

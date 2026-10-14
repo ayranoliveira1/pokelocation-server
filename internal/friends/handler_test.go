@@ -90,7 +90,7 @@ func (e *env) request(from, to user) map[string]any {
 
 type listed struct {
 	friends            map[string]string // user_id → friend_code
-	names              map[string]any    // user_id → username dos amigos (nil se a conta não tem)
+	names              map[string]any
 	incoming, outgoing map[string]map[string]any
 }
 
@@ -179,7 +179,7 @@ func TestRequestErrors(t *testing.T) {
 		{`{"code":"ZZZZZZZZ"}`, 404, "code_not_found"},
 		{`{"code":"curto"}`, 404, "code_not_found"},
 		{`{"code":""}`, 404, "code_not_found"},
-		{`{}`, 400, "bad_request"}, // nem code nem username
+		{`{}`, 400, "bad_request"},
 		{`{"code":"ZZZZZZZZ","username":"bob_1"}`, 400, "bad_request"},
 		{`{"code":1}`, 400, "bad_request"},
 		{`não é json`, 400, "bad_request"},
@@ -459,7 +459,6 @@ func TestBlockDropsEnvelopes(t *testing.T) {
 	}
 }
 
-// Toda requisição tem prazo: vencido, a query é cancelada e responde 503 (o statement_timeout é só a rede).
 func TestDeadline(t *testing.T) {
 	e := newEnv(t)
 	a := e.user()
@@ -470,7 +469,6 @@ func TestDeadline(t *testing.T) {
 	e.want(a, "POST", "/v1/blocks/"+nobody, "", 503, "unavailable")
 }
 
-// LIMIT defensivo acima dos tetos (500 amigos + 2×50 pedidos): a lista nunca passa de listLimit linhas.
 func TestListLimit(t *testing.T) {
 	e := newEnv(t)
 	a := e.user()
@@ -486,7 +484,6 @@ func TestListLimit(t *testing.T) {
 
 func (e *env) name(u user, n string) { e.exec(`UPDATE users SET username = $2 WHERE id = $1`, u.id, n) }
 
-// Pedido por @nome (§8): normalizado como no cadastro; inválido, inexistente ou de quem te bloqueou → code_not_found.
 func TestRequestByUsername(t *testing.T) {
 	e := newEnv(t)
 	a, b, c, blocker := e.user(), e.user(), e.user(), e.user()
@@ -505,7 +502,7 @@ func TestRequestByUsername(t *testing.T) {
 	if r := e.list(b).incoming[a.id]; r == nil || r["username"] != "alice" {
 		t.Fatalf("incoming sem username: %v", e.list(b).incoming)
 	}
-	e.want(b, "POST", "/v1/friends/requests", `{"username":"alice"}`, 200, "") // cruzado
+	e.want(b, "POST", "/v1/friends/requests", `{"username":"alice"}`, 200, "")
 	if n := e.list(a).names[b.id]; n != "bob_1" {
 		t.Fatalf("friends sem username: %v", e.list(a).names)
 	}
@@ -515,8 +512,8 @@ func TestRequestByUsername(t *testing.T) {
 	}
 	e.want(a, "POST", "/v1/friends/requests", `{"username":"blocker"}`, 404, "code_not_found") // nunca revela
 	e.want(a, "POST", "/v1/friends/requests", `{"username":"alice"}`, 400, "self_request")
-	for range 6 { // 4 + 6 erros de c
+	for range 6 {
 		e.want(c, "POST", "/v1/friends/requests", `{"username":"x"}`, 404, "code_not_found")
 	}
-	e.want(c, "POST", "/v1/friends/requests", `{"username":"bob_1"}`, 429, "rate_limited") // o mesmo limite de 10
+	e.want(c, "POST", "/v1/friends/requests", `{"username":"bob_1"}`, 429, "rate_limited")
 }

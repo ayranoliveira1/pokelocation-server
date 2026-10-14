@@ -25,7 +25,6 @@ type bucket struct {
 // New: balde de perMin, recarga de 1 a cada 60/perMin s.
 func New(perMin int) *Limiter { return NewWindow(perMin, time.Minute) }
 
-// NewWindow: balde de n, recarga de 1 a cada window/n.
 func NewWindow(n int, window time.Duration) *Limiter {
 	return &Limiter{n: n, window: window, m: map[string]*bucket{}}
 }

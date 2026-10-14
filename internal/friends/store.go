@@ -19,7 +19,6 @@ const lockPair = `SELECT pg_advisory_xact_lock(hashtextextended(least($1::uuid, 
 
 const pairIs = `least(requester_id, addressee_id) = least($1::uuid, $2::uuid) AND greatest(requester_id, addressee_id) = greatest($1::uuid, $2::uuid)`
 
-// Queries com o plano conferido em indexes_integration_test.go.
 const (
 	qUserByCode     = `SELECT id FROM users WHERE friend_code = $1`
 	qUserByUsername = `SELECT id FROM users WHERE username = $1`

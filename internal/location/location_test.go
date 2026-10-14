@@ -503,7 +503,6 @@ func TestGetLocationsDeadline(t *testing.T) {
 	}
 }
 
-// LIMIT defensivo acima do teto de 500 amigos.
 func TestGetLocationsLimit(t *testing.T) {
 	t.Parallel()
 	rdb := testdb.Redis(t)
@@ -535,7 +534,6 @@ func TestGetLocationsLimit(t *testing.T) {
 	}
 }
 
-// RAM do estado por usuário com 15 mil compartilhando (payload real ~125 B). Falha se piorar muito.
 func TestMemoryPerUser(t *testing.T) {
 	const n = 15000
 	ids := make([]string, n)

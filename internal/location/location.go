@@ -209,7 +209,6 @@ func (s *Service) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	mux.Handle("GET /v1/locations", authed(httpx.Timed(s.reqWait, s.locations)))
 }
 
-// Plano conferido em indexes_integration_test.go.
 const (
 	qFriends = `SELECT u.id, u.friend_code, u.username FROM friendships f
 		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END

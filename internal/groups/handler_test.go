@@ -82,7 +82,6 @@ func (e *env) friends(a string, bs ...string) {
 	}
 }
 
-// friendsBulk: n amigos novos de u, direto no banco.
 func (e *env) friendsBulk(u string, n int) []string {
 	e.t.Helper()
 	rows, err := e.pool.Query(context.Background(), `WITH x AS (
@@ -105,7 +104,6 @@ func (e *env) friendsBulk(u string, n int) []string {
 	return ids
 }
 
-// inGroups: põe u em n grupos de mentira (dono = u).
 func (e *env) inGroups(u string, n int) {
 	e.exec(`WITH g AS (INSERT INTO groups (owner_id) SELECT $1 FROM generate_series(1, $2) RETURNING id)
 		INSERT INTO group_members (group_id, user_id) SELECT id, $1 FROM g`, u, n)
@@ -244,7 +242,7 @@ func TestCreateAndGet(t *testing.T) {
 		e.want(d, "GET", "/v1/groups/"+gid, "", 404, "not_found")
 	}
 
-	solo := e.create(d) // lista vazia: grupo só com o dono
+	solo := e.create(d)
 	if g := e.get(d, solo); !slices.Equal(g.ids(), []string{d}) {
 		t.Fatalf("grupo só com o dono: %+v", g)
 	}
@@ -266,7 +264,7 @@ func TestCreateRules(t *testing.T) {
 	}
 	e.want(a, "POST", "/v1/groups", members("x"), 400, "bad_request")
 	e.want(a, "POST", "/v1/groups", `não é json`, 400, "bad_request")
-	e.want(a, "POST", "/v1/groups", `{}`, 201, "") // members ausente = vazio
+	e.want(a, "POST", "/v1/groups", `{}`, 201, "")
 	e.takeChanges()
 
 	many := e.friendsBulk(a, maxMembers)
@@ -281,7 +279,7 @@ func TestTooManyGroups(t *testing.T) {
 	e.inGroups(b, maxGroups)
 	e.want(a, "POST", "/v1/groups", members(b), 409, "too_many_groups")
 	e.inGroups(a, maxGroups-1)
-	e.create(a) // o 25º do dono
+	e.create(a)
 	e.want(a, "POST", "/v1/groups", members(), 409, "too_many_groups")
 	e.wantChange(e.lastGroup(a), a)
 }
@@ -302,9 +300,9 @@ func TestAddMember(t *testing.T) {
 	id := e.create(a, b)
 	e.takeChanges()
 
-	e.add(b, id, d, 204, "") // qualquer membro adiciona amigo dele
+	e.add(b, id, d, 204, "")
 	e.wantChange(id, a, b, d)
-	e.add(b, id, d, 204, "") // já é membro: idempotente, sem aviso
+	e.add(b, id, d, 204, "")
 	e.wantNoChange()
 	e.add(b, id, stranger, 403, "forbidden")
 	e.add(b, id, blocked, 403, "forbidden")
@@ -314,7 +312,6 @@ func TestAddMember(t *testing.T) {
 	e.want(b, "POST", "/v1/groups/"+id+"/members", `{"user_id":"x"}`, 400, "bad_request")
 	e.wantNoChange()
 
-	// cheio
 	many := e.friendsBulk(a, maxMembers-3)
 	for _, m := range many {
 		e.add(a, id, m, 204, "")
@@ -322,7 +319,6 @@ func TestAddMember(t *testing.T) {
 	extra := e.friendsBulk(a, 1)[0]
 	e.add(a, id, extra, 409, "too_many_members")
 
-	// o novo já em 25 grupos
 	e2 := e.user()
 	e.friends(b, e2)
 	e.inGroups(e2, maxGroups)
@@ -340,14 +336,14 @@ func TestRemoveAndLeave(t *testing.T) {
 	e.exec(`UPDATE group_members SET joined_at = now() - interval '2 hour' WHERE group_id = $1 AND user_id = $2`, id, a)
 	e.takeChanges()
 
-	e.want(b, "DELETE", "/v1/groups/"+id+"/members/"+c, "", 403, "forbidden") // só o dono remove outros
+	e.want(b, "DELETE", "/v1/groups/"+id+"/members/"+c, "", 403, "forbidden")
 	e.want(e.user(), "DELETE", "/v1/groups/"+id+"/members/"+c, "", 404, "not_found")
 	e.wantNoChange()
 
 	e.want(a, "DELETE", "/v1/groups/"+id+"/members/"+c, "", 204, "")
 	e.wantChange(id, a, b, d, c) // os atuais e quem saiu
 	e.want(c, "GET", "/v1/groups/"+id, "", 404, "not_found")
-	e.want(a, "DELETE", "/v1/groups/"+id+"/members/"+c, "", 204, "") // já fora: nada muda
+	e.want(a, "DELETE", "/v1/groups/"+id+"/members/"+c, "", 204, "")
 	e.wantNoChange()
 
 	e.want(a, "DELETE", "/v1/groups/"+id+"/members/"+a, "", 204, "") // o dono sai: herda o mais antigo (b)
@@ -356,9 +352,9 @@ func TestRemoveAndLeave(t *testing.T) {
 		t.Fatalf("depois de o dono sair: %+v", g)
 	}
 
-	e.want(d, "DELETE", "/v1/groups/"+id+"/members/"+d, "", 204, "") // membro comum sai
+	e.want(d, "DELETE", "/v1/groups/"+id+"/members/"+d, "", 204, "")
 	e.wantChange(id, b, d)
-	e.want(b, "DELETE", "/v1/groups/"+id+"/members/"+b, "", 204, "") // o último sai: o grupo some
+	e.want(b, "DELETE", "/v1/groups/"+id+"/members/"+b, "", 204, "")
 	e.wantChange(id, b)
 	var n int
 	e.pool.QueryRow(context.Background(), `SELECT count(*) FROM groups WHERE id = $1`, id).Scan(&n)
@@ -368,8 +364,7 @@ func TestRemoveAndLeave(t *testing.T) {
 	e.want(b, "DELETE", "/v1/groups/"+id+"/members/"+b, "", 404, "not_found")
 }
 
-// warm abre n conexões no pool antes de uma corrida: sem isso, abrir conexão demora mais que a transação e as
-// requisições "simultâneas" acabam em fila numa conexão só.
+// Sem abrir as conexões antes, abrir conexão demora mais que a transação e a corrida vira fila.
 func (e *env) warm(n int) {
 	e.t.Helper()
 	conns := make([]*pgxpool.Conn, n)
@@ -385,13 +380,12 @@ func (e *env) warm(n int) {
 	}
 }
 
-// Corridas: adds simultâneos num grupo quase cheio e criações simultâneas com alguém em 24 grupos.
 func TestConcurrentLimits(t *testing.T) {
 	e := newEnv(t)
 	e.warm(24)
 	a := e.user()
 	base := e.friendsBulk(a, maxMembers-2)
-	id := e.create(a, base...) // 49 membros
+	id := e.create(a, base...) // 49 membros: 1 vaga
 	cands := e.friendsBulk(a, 20)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -451,16 +445,14 @@ func TestOnChangeNil(t *testing.T) {
 	e.want(a, "DELETE", "/v1/groups/"+id+"/members/"+a, "", 204, "")
 }
 
-// LeaveAllTx (vínculo Google do auth): tira o usuário de todos os grupos com a regra do remove, dentro do tx de quem
-// chama, e devolve o que mudou para o aviso depois do commit.
 func TestLeaveAllTx(t *testing.T) {
 	e := newEnv(t)
 	u, x, y := e.user(), e.user(), e.user()
 	e.friends(u, x)
 	e.friends(y, u)
-	owned := e.create(u, x)  // u é dono: x herda
-	member := e.create(y, u) // u é só membro
-	alone := e.create(u)     // só u: o grupo some
+	owned := e.create(u, x)
+	member := e.create(y, u)
+	alone := e.create(u)
 	e.exec(`UPDATE group_members SET joined_at = now() - interval '1 hour' WHERE user_id = $1`, u)
 	e.takeChanges()
 
@@ -503,7 +495,7 @@ func TestLeaveAllTx(t *testing.T) {
 		t.Fatal("grupo só com u continua")
 	}
 
-	if changes, err := e.leaveAll(u); err != nil || len(changes) != 0 { // sem grupos: nada
+	if changes, err := e.leaveAll(u); err != nil || len(changes) != 0 {
 		t.Fatalf("de novo: %v %v", changes, err)
 	}
 }
@@ -518,7 +510,6 @@ func (e *env) leaveAll(u string) ([]Change, error) {
 	return out, err
 }
 
-// Teto do JSON do GET /v1/groups (o app lê até 192 KiB): pior caso dos tetos cabe; acima disso, 413 sem cortar.
 func TestListSize(t *testing.T) {
 	e := newEnv(t)
 	u := e.user()

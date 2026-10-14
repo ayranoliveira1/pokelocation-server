@@ -18,9 +18,7 @@ func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool} }
 
 const lockUser = `SELECT pg_advisory_xact_lock(hashtextextended('groups:' || $1::text, 0))`
 
-// Queries com o plano conferido em indexes_integration_test.go.
 const (
-	// amigos aceitos de $1, sem bloqueio em nenhum sentido, entre os $2
 	qFriendsOK = `SELECT count(*) FROM unnest($2::uuid[]) m
 		WHERE EXISTS (SELECT 1 FROM friendships WHERE status = 'accepted'
 			AND least(requester_id, addressee_id) = least($1::uuid, m)
@@ -64,7 +62,7 @@ const (
 		GROUP BY g.id`
 )
 
-// lockUsers trava em ordem fixa (evita deadlock entre duas criações com os mesmos usuários).
+// Ordem fixa: evita deadlock entre duas criações com os mesmos usuários.
 func lockUsers(ctx context.Context, tx pgx.Tx, users []string) error {
 	users = slices.Sorted(slices.Values(users))
 	b := &pgx.Batch{}
@@ -96,7 +94,6 @@ func groupsFull(ctx context.Context, tx pgx.Tx, users []string) error {
 	return nil
 }
 
-// create: members já sem repetidos e sem o dono. Devolve o id e todos os membros.
 func (s *Store) create(ctx context.Context, owner string, members []string) (id string, users []string, err error) {
 	users = append([]string{owner}, members...)
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -120,7 +117,7 @@ func (s *Store) create(ctx context.Context, owner string, members []string) (id 
 	return id, users, err
 }
 
-// lockMember trava o grupo e confere que me é membro (senão ErrNotFound, sem revelar se existe).
+// ErrNotFound também para grupo inexistente: não revela se existe.
 func lockMember(ctx context.Context, tx pgx.Tx, group, me string) (owner string, err error) {
 	err = tx.QueryRow(ctx, qLockGroup, group).Scan(&owner)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -147,7 +144,6 @@ func currentMembers(ctx context.Context, tx pgx.Tx, group string) ([]string, err
 	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
-// add devolve os membros atuais; nil se nada mudou (já era membro).
 func (s *Store) add(ctx context.Context, me, group, user string) (users []string, err error) {
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if _, err := lockMember(ctx, tx, group, me); err != nil {
@@ -182,7 +178,6 @@ func (s *Store) add(ctx context.Context, me, group, user string) (users []string
 	return users, err
 }
 
-// remove devolve os membros que ficaram mais o que saiu; nil se nada mudou (target já fora).
 func (s *Store) remove(ctx context.Context, me, group, target string) (users []string, err error) {
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		owner, err := lockMember(ctx, tx, group, me)
@@ -198,7 +193,7 @@ func (s *Store) remove(ctx context.Context, me, group, target string) (users []s
 	return users, err
 }
 
-// leaveLocked: com o grupo já travado, tira target; o dono saindo passa ao mais antigo e o último apaga o grupo.
+// Chamar com o grupo travado.
 func leaveLocked(ctx context.Context, tx pgx.Tx, group, owner, target string) ([]string, error) {
 	tag, err := tx.Exec(ctx, qRemoveMember, group, target)
 	if err != nil || tag.RowsAffected() == 0 {
@@ -217,14 +212,14 @@ func leaveLocked(ctx context.Context, tx pgx.Tx, group, owner, target string) ([
 	return append(left, target), err
 }
 
-// Change: um grupo que mudou e quem avisar (os membros que ficaram e quem saiu).
+// Users: os membros que ficaram e quem saiu (quem avisar).
 type Change struct {
 	Group string
 	Users []string
 }
 
-// LeaveAllTx tira user de todos os grupos dentro de tx (vínculo Google: a conta volta limpa ao dono do email). Os
-// grupos são travados em ordem de id, como um DELETE de membro por vez. Quem chama avisa depois do commit.
+// LeaveAllTx roda no tx de quem chama (vínculo Google) e trava os grupos em ordem de id; quem chama avisa depois
+// do commit.
 func LeaveAllTx(ctx context.Context, tx pgx.Tx, user string) ([]Change, error) {
 	rows, err := tx.Query(ctx, qUserGroups, user)
 	if err != nil {

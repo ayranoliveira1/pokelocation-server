@@ -54,7 +54,7 @@ func (h *Handler) request(w http.ResponseWriter, r *http.Request) {
 	if !httpx.Decode(w, r, 4<<10, &in) {
 		return
 	}
-	if (in.Code == nil) == (in.Username == nil) { // um ou outro (§8)
+	if (in.Code == nil) == (in.Username == nil) {
 		httpx.Error(w, http.StatusBadRequest, "bad_request")
 		return
 	}

@@ -72,7 +72,7 @@ func (s *Service) Request(ctx context.Context, me, rawCode string) (id, status s
 	return s.requestTo(ctx, me, to)
 }
 
-// RequestByUsername: nome inválido conta como inexistente (code_not_found), como o código.
+// Nome inválido responde code_not_found, como código inválido.
 func (s *Service) RequestByUsername(ctx context.Context, me, raw string) (id, status string, created bool, err error) {
 	name, err := username.Check(raw)
 	if err != nil {

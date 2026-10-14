@@ -466,7 +466,6 @@ func TestFetchRateLimit(t *testing.T) {
 	}
 }
 
-// O take consome pela ordem de key_id (o índice único entrega essa ordem sem ordenar), não pela de inserção.
 func TestFetchOrderByKeyID(t *testing.T) {
 	e := newEnv(t)
 	a, b := e.user(), e.user()
@@ -491,7 +490,6 @@ func TestDeadline(t *testing.T) {
 	e.want(a, "GET", "/v1/keys/"+nobody, nil, 503, "unavailable")
 }
 
-// Membro de um grupo em comum também lê as chaves (abre a sessão 1:1 que leva a sender key do grupo), sem bloqueio.
 func TestFetchGroupMember(t *testing.T) {
 	e := newEnv(t)
 	a, b, c := e.user(), e.user(), e.user()
@@ -507,6 +505,6 @@ func TestFetchGroupMember(t *testing.T) {
 	e.exec(`INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2)`, a, b)
 	e.want(b, "GET", "/v1/keys/"+a, nil, 403, "forbidden")
 	e.exec(`DELETE FROM blocks`)
-	e.exec(`DELETE FROM group_members WHERE user_id = $1`, b) // saiu do grupo
+	e.exec(`DELETE FROM group_members WHERE user_id = $1`, b)
 	e.want(b, "GET", "/v1/keys/"+a, nil, 403, "forbidden")
 }

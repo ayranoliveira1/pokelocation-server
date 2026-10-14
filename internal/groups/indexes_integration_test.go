@@ -11,8 +11,7 @@ import (
 func TestIndices(t *testing.T)     { t.Parallel(); checkIndices(t, testdb.Pool(t)) }
 func TestIndicesSeed(t *testing.T) { checkIndices(t, testdb.Seed(t)) }
 
-// Toda leitura do store. qInsertGroup, qInsertMembers e qAddMember ficam de fora: INSERT de VALUES/unnest não lê
-// tabela.
+// qInsertGroup, qInsertMembers e qAddMember ficam de fora: INSERT de VALUES/unnest não lê tabela.
 func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 	s := testdb.SampleOf(t, pool)
 	const anyGroup = "00000000-0000-4000-8000-000000000000"
