@@ -151,10 +151,18 @@ func TestMigrate(t *testing.T) {
 		"usuário sem email nem google":  `INSERT INTO users (friend_code) VALUES ('0123ABCF')`,
 		"amizade consigo":               `INSERT INTO friendships (requester_id, addressee_id, status) VALUES ('` + a + `', '` + a + `', 'pending')`,
 		"kyber sem assinatura":          `INSERT INTO one_time_prekeys (user_id, kind, key_id, public_key) VALUES ('` + a + `', 'kyber', 1, '\x08')`,
+		"@nome com '..'":                `UPDATE users SET username = 'ana..b' WHERE id = '` + a + `'`,
+		"@nome maiúsculo":               `UPDATE users SET username = 'Ana' WHERE id = '` + a + `'`,
 	} {
 		if _, err := pool.Exec(ctx, q); err == nil {
 			t.Errorf("%s: aceito", name)
 		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET username = 'ana' WHERE id = $1`, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE users SET username = 'ana' WHERE id = $1`, b); err == nil {
+		t.Error("@nome repetido: aceito")
 	}
 	pair := `INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($1, $2, 'pending')`
 	if _, err := pool.Exec(ctx, pair, a, b); err != nil {

@@ -281,13 +281,20 @@ func (s *server) match(r resp, status int, code string) bool {
 	return r.status == status && (code == "" || r.errCode() == code)
 }
 
-type user struct{ id, email, password, code, access, refresh string }
+type user struct{ id, email, password, code, username, access, refresh string }
+
+// newUsername: único, no formato do §8 (começa com letra, [a-z0-9_.], até 20). O nome do teste vem primeiro para ler.
+func newUsername(name string) string {
+	return fmt.Sprintf("%.8s_%s", name, strings.ToLower(rand.Text()[:8]))
+}
 
 // register conta no limite de 5/min por email.
 func (s *server) register(name string) user {
 	s.t.Helper()
-	u := user{email: name + "." + strings.ToLower(rand.Text()[:10]) + "@teste.dev", password: "senha-" + rand.Text()}
-	r := s.do("POST", "/v1/auth/register", "", map[string]string{"email": u.email, "password": u.password})
+	u := user{email: name + "." + strings.ToLower(rand.Text()[:10]) + "@teste.dev", password: "senha-" + rand.Text(),
+		username: newUsername(name)}
+	r := s.do("POST", "/v1/auth/register", "", map[string]string{"email": u.email, "password": u.password,
+		"username": u.username})
 	s.want(r, 201, "")
 	u.access, u.refresh = r.str("access_token"), r.str("refresh_token")
 	me := s.do("GET", "/v1/me", u.access, nil)

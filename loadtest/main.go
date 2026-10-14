@@ -145,9 +145,10 @@ func seedUsers(ctx context.Context, db *pgx.Conn, key ed25519.PrivateKey) []user
 	for i := range users {
 		id := uuid()
 		users[i] = user{id: id, token: sign(key, map[string]any{"sub": id, "iat": time.Now().Unix(), "exp": exp, "tv": 0})}
-		rows[i] = []any{id, fmt.Sprintf("lt-%d@load.test", i), friendCode()}
+		rows[i] = []any{id, fmt.Sprintf("lt-%d@load.test", i), fmt.Sprintf("lt_%d", i), friendCode()}
 	}
-	if _, err := db.CopyFrom(ctx, pgx.Identifier{"users"}, []string{"id", "email", "friend_code"},
+	// Sem @nome, o Auth do WS recusa (username_required).
+	if _, err := db.CopyFrom(ctx, pgx.Identifier{"users"}, []string{"id", "email", "username", "friend_code"},
 		pgx.CopyFromRows(rows)); err != nil {
 		fail("seed users: %v", err)
 	}

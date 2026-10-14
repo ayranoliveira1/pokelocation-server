@@ -305,8 +305,8 @@ func TestTetosAmigos(t *testing.T) {
 func seedFriends(s *server, u string, n int, status string, outgoing bool) {
 	s.t.Helper()
 	q := `WITH nu AS (
-		INSERT INTO users (email, friend_code)
-		SELECT 'seed-' || gen_random_uuid() || '@teste.dev',
+		INSERT INTO users (email, username, friend_code)
+		SELECT 'seed-' || gen_random_uuid() || '@teste.dev', 's' || substr(md5(random()::text), 1, 12),
 		       (SELECT string_agg(substr('0123456789ABCDEFGHJKMNPQRSTVWXYZ', 1 + floor(random() * 32)::int, 1), '')
 		          FROM generate_series(1, 8) WHERE g > 0)
 		FROM generate_series(1, $2) g

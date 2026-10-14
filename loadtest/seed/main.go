@@ -96,7 +96,7 @@ func seedUsers(ctx context.Context, c *pgx.Conn) []string {
 	codes := map[string]bool{}
 	i := 0
 	step("users", func() int64 {
-		return copyRows(ctx, c, "users", []string{"id", "email", "password_hash", "google_sub", "friend_code", "created_at"},
+		return copyRows(ctx, c, "users", []string{"id", "email", "username", "password_hash", "google_sub", "friend_code", "created_at"},
 			func() ([]any, bool) {
 				if i == len(ids) {
 					return nil, false
@@ -111,7 +111,7 @@ func seedUsers(ctx context.Context, c *pgx.Conn) []string {
 				if rn(5) == 0 { // ~20% entram pelo Google
 					hash, sub = nil, "g"+strconv.Itoa(i)
 				}
-				row := []any{ids[i], email, hash, sub, code, ago(365 * 24 * time.Hour)}
+				row := []any{ids[i], email, fmt.Sprintf("u%d", i), hash, sub, code, ago(365 * 24 * time.Hour)}
 				i++
 				return row, true
 			})
