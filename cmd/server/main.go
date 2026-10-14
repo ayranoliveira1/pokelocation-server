@@ -96,7 +96,7 @@ func run() error {
 		return err
 	}
 	var loc *location.Service // relay → location só por callback (location importa relay)
-	hub := relay.New(pool, authH.Verify, func(c *relay.Conn, f wire.Frame) { loc.OnFrame(c, f) })
+	hub := relay.New(pool, authH.ParseAccess, func(c *relay.Conn, f wire.Frame) { loc.OnFrame(c, f) })
 	loc = location.New(rdb, pool, hub)
 	if cfg.cluster {
 		hub.EnableCluster(ctx, rdb)

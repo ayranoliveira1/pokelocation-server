@@ -48,8 +48,19 @@ var (
 )
 
 // Pool devolve um banco novo, já migrado, apagado no fim do teste.
+//
+// Com TESTDB_POSTGRES_URL, usa esse banco já migrado, compartilhado e sem limpeza (a auditoria roda os testes
+// sobre o seed de loadtest/seed): os testes não podem depender de banco vazio.
 func Pool(t testing.TB) *pgxpool.Pool {
 	t.Helper()
+	if url := os.Getenv("TESTDB_POSTGRES_URL"); url != "" {
+		pool, err := db.Open(context.Background(), url)
+		if err != nil {
+			t.Fatal("testdb:", err)
+		}
+		t.Cleanup(pool.Close)
+		return pool
+	}
 	needDocker(t)
 	pgOnce.Do(startPostgres)
 	if pgErr != nil {

@@ -212,8 +212,21 @@ func (s *Store) revoke(ctx context.Context, hash []byte) (string, error) {
 	return owner, nil
 }
 
-// cleanup: os usados ficam até vencer, porque é com eles que o reuso é detectado.
+const (
+	cleanupBatch = 1000
+	batchWait    = 5 * time.Second
+)
+
+// cleanup em lotes curtos, cada um com prazo próprio: um DELETE único passaria do statement_timeout com muitos
+// vencidos. Os usados ficam até vencer, porque é com eles que o reuso é detectado.
 func (s *Store) cleanup(ctx context.Context, now time.Time) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM refresh_tokens WHERE expires_at < $1`, now)
-	return err
+	for {
+		bctx, cancel := context.WithTimeout(ctx, batchWait)
+		tag, err := s.pool.Exec(bctx, `DELETE FROM refresh_tokens WHERE id IN
+			(SELECT id FROM refresh_tokens WHERE expires_at < $1 LIMIT $2)`, now, cleanupBatch)
+		cancel()
+		if err != nil || tag.RowsAffected() < cleanupBatch {
+			return err
+		}
+	}
 }

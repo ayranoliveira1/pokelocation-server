@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -310,6 +312,7 @@ type env struct {
 	pool *pgxpool.Pool
 	rdb  *redis.Client
 	mux  *http.ServeMux
+	s    *Service
 }
 
 func newEnv(t *testing.T, rdb *redis.Client) *env {
@@ -318,7 +321,7 @@ func newEnv(t *testing.T, rdb *redis.Client) *env {
 	s := newService(rdb, pool, func(string, []byte) {})
 	mux := http.NewServeMux()
 	s.Routes(mux, func(h http.HandlerFunc) http.Handler { return h })
-	return &env{t, pool, rdb, mux}
+	return &env{t, pool, rdb, mux, s}
 }
 
 func (e *env) user() (id, code string) {
@@ -463,7 +466,7 @@ func TestNewWithHub(t *testing.T) {
 	t.Parallel()
 	rdb := testdb.Redis(t)
 	pool := testdb.Pool(t)
-	hub := relay.New(pool, func(context.Context, string) (string, time.Time, error) { return "", time.Time{}, nil }, nil)
+	hub := relay.New(pool, func(string) (string, time.Time, int, error) { return "", time.Time{}, 0, nil }, nil)
 	s := New(rdb, pool, hub)
 	s.OnFrame(&relay.Conn{}, loc("p")) // Conn zero: User() == ""
 	s.flush(context.Background())
@@ -474,7 +477,7 @@ func TestNewWithHub(t *testing.T) {
 
 // O mesmo pelo caminho real: OnFrame → relay.Buf → hub.SendFriends (buffer volta ao pool do hub).
 func TestAllocsWithHub(t *testing.T) {
-	hub := relay.New(nil, func(context.Context, string) (string, time.Time, error) { return "", time.Time{}, nil }, nil)
+	hub := relay.New(nil, func(string) (string, time.Time, int, error) { return "", time.Time{}, 0, nil }, nil)
 	s := New(nil, nil, hub)
 	c := &clock{time.Unix(1_000_000, 0)}
 	s.now = c.now
@@ -484,4 +487,75 @@ func TestAllocsWithHub(t *testing.T) {
 	if n := testing.AllocsPerRun(1000, func() { c.add(5 * time.Second); s.OnFrame(conn, f) }); n != 0 {
 		t.Fatalf("OnFrame com o hub real: %v allocs/op, want 0", n)
 	}
+}
+
+func TestGetLocationsDeadline(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t, testdb.Redis(t))
+	a, _ := e.user()
+	e.s.reqWait = time.Nanosecond
+	e.mux = http.NewServeMux() // o prazo entra no registro das rotas
+	e.s.Routes(e.mux, func(h http.HandlerFunc) http.Handler { return h })
+	if status, _, raw := e.get(a); status != 503 || !strings.Contains(raw, "unavailable") {
+		t.Fatalf("prazo vencido: %d %s", status, raw)
+	}
+}
+
+// LIMIT defensivo acima do teto de 500 amigos.
+func TestGetLocationsLimit(t *testing.T) {
+	t.Parallel()
+	rdb := testdb.Redis(t)
+	e := newEnv(t, rdb)
+	ctx := context.Background()
+	a, _ := e.user()
+	e.exec(`WITH x AS (
+		INSERT INTO users (email, friend_code)
+		SELECT gen_random_uuid()::text || '@x', upper(substr(md5(random()::text), 1, 8)) FROM generate_series(1, $1)
+		RETURNING id)
+		INSERT INTO friendships (requester_id, addressee_id, status) SELECT id, $2, 'accepted' FROM x`, friendsLimit+5, a)
+	rows, err := e.pool.Query(ctx, `SELECT requester_id FROM friendships WHERE addressee_id = $1`, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipe := rdb.Pipeline()
+	var id string
+	for rows.Next() {
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		pipe.Set(ctx, "loc:"+id, "p", time.Minute)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if status, got, _ := e.get(a); status != 200 || len(got) != friendsLimit {
+		t.Fatalf("%d, %d posições; want 200 e o LIMIT %d", status, len(got), friendsLimit)
+	}
+}
+
+// RAM do estado por usuário com 15 mil compartilhando (payload real ~125 B). Falha se piorar muito.
+func TestMemoryPerUser(t *testing.T) {
+	const n = 15000
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("%08x-aaaa-4aaa-8aaa-aaaaaaaaaaaa", i)
+	}
+	f := wire.Frame{Type: wire.Location, Payload: bytes.Repeat([]byte{7}, 125)}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	s := newService(nil, nil, func(string, []byte) {})
+	pool := make([]byte, 0, 512)
+	s.buf = func() []byte { return pool[:0] }
+	for _, id := range ids {
+		s.handle(id, f)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	per := int(after.HeapAlloc-before.HeapAlloc) / n
+	t.Logf("%d usuários: %d B por usuário, %.1f MiB no total", n, per, float64(after.HeapAlloc-before.HeapAlloc)/(1<<20))
+	if per > 1024 {
+		t.Fatalf("%d B por usuário, teto 1024", per)
+	}
+	runtime.KeepAlive(s)
 }

@@ -2,8 +2,10 @@ package relay
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,7 +24,7 @@ type queuedEnvelope struct {
 // friends: o bloqueio apaga a amizade, então aceita já é sem bloqueio.
 func (s *Store) friends(ctx context.Context, user string) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `SELECT (CASE WHEN requester_id = $1 THEN addressee_id ELSE requester_id END)::text
-		FROM friendships WHERE status = 'accepted' AND (requester_id = $1 OR addressee_id = $1)`, user)
+		FROM friendships WHERE status = 'accepted' AND (requester_id = $1 OR addressee_id = $1) LIMIT $2`, user, maxFriendsRead)
 	if err != nil {
 		return nil, err
 	}
@@ -47,10 +49,21 @@ func (s *Store) ackIDs(ctx context.Context, recipient string, ids []int64) error
 	return err
 }
 
-func (s *Store) maxID(ctx context.Context, recipient string) (int64, error) {
-	var id int64
-	err := s.pool.QueryRow(ctx, `SELECT coalesce(max(id), 0) FROM envelopes WHERE recipient_id = $1`, recipient).Scan(&id)
-	return id, err
+var errNoUser = errors.New("relay: usuário não existe")
+
+// session lê, num snapshot só, a versão dos tokens, o corte do backlog e os amigos (o Auth do WS).
+func (s *Store) session(ctx context.Context, user string) (version int, cutoff int64, friends []string, err error) {
+	err = s.pool.QueryRow(ctx, `SELECT u.token_version,
+			(SELECT coalesce(max(e.id), 0) FROM envelopes e WHERE e.recipient_id = u.id),
+			ARRAY(SELECT (CASE WHEN f.requester_id = u.id THEN f.addressee_id ELSE f.requester_id END)::text
+				FROM friendships f
+				WHERE f.status = 'accepted' AND (f.requester_id = u.id OR f.addressee_id = u.id) LIMIT $2)
+		FROM users u WHERE u.id = $1`, user, maxFriendsRead).Scan(&version, &cutoff, &friends)
+	var pg *pgconn.PgError
+	if errors.Is(err, pgx.ErrNoRows) || errors.As(err, &pg) && pg.Code == "22P02" {
+		err = errNoUser
+	}
+	return version, cutoff, friends, err
 }
 
 func (s *Store) page(ctx context.Context, recipient string, after, upTo int64, limit int) ([]queuedEnvelope, error) {
@@ -62,8 +75,15 @@ func (s *Store) page(ctx context.Context, recipient string, after, upTo int64, l
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[queuedEnvelope])
 }
 
-// ponytail: sem índice em created_at, é um seq scan diário (a fila é pequena: sai no Ack). Índice ou corte por id se pesar.
+// cleanup em lotes curtos, cada um com prazo próprio: um DELETE único passaria do statement_timeout com a fila grande.
 func (s *Store) cleanup(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM envelopes WHERE created_at < now() - interval '30 days'`)
-	return err
+	for {
+		bctx, cancel := context.WithTimeout(ctx, batchWait)
+		tag, err := s.pool.Exec(bctx, `DELETE FROM envelopes WHERE id IN
+			(SELECT id FROM envelopes WHERE created_at < now() - interval '30 days' LIMIT $1)`, cleanupBatch)
+		cancel()
+		if err != nil || tag.RowsAffected() < cleanupBatch {
+			return err
+		}
+	}
 }

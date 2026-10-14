@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/ayranoliveira1/pokelocation-server/internal/auth"
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
 
@@ -169,11 +168,12 @@ type Conn struct {
 	u     *user
 	q     queue
 	done  chan struct{} // fecha quando o writer termina
+	ready chan struct{} // fecha quando o Auth aprova: antes disso o writer não escreve frame de dado
 	exp   *time.Timer
 }
 
 func newConn(h *Hub, ws *websocket.Conn) *Conn {
-	return &Conn{hub: h, ws: ws, done: make(chan struct{}),
+	return &Conn{hub: h, ws: ws, done: make(chan struct{}), ready: make(chan struct{}),
 		q: queue{wake: make(chan struct{}, 1), space: make(chan struct{}, 1)}}
 }
 
@@ -189,8 +189,7 @@ func (c *Conn) friend(peer []byte) bool {
 	if fs == nil {
 		return false
 	}
-	_, ok := fs.has[string(peer)]
-	return ok
+	return fs.has(peer)
 }
 
 // kill: o primeiro vale. Não bloqueia: o writer manda o Error e o close e fecha o socket. code 0 = só fecha.
@@ -222,6 +221,20 @@ func (c *Conn) sendError(code string) {
 func (c *Conn) writeLoop() {
 	defer close(c.done)
 	defer c.ws.Close() // acorda o readLoop
+	// O token só é conferido contra token_version depois do register: até o Auth aprovar, o que chegar fica na fila
+	// e só o Error/close de um kill pode sair (um token revogado não vê nem metadado).
+	for waiting := true; waiting; {
+		select {
+		case <-c.ready:
+			waiting = false
+		case <-c.q.wake:
+			if c.closing() {
+				c.writeClose()
+				return
+			}
+		}
+	}
+	signal(c.q.wake)
 	ping := time.NewTicker(pingEvery)
 	defer ping.Stop()
 	for {
@@ -249,6 +262,12 @@ func (c *Conn) writeLoop() {
 			}
 		}
 	}
+}
+
+func (c *Conn) closing() bool {
+	c.q.mu.Lock()
+	defer c.q.mu.Unlock()
+	return c.q.closing
 }
 
 func (c *Conn) writeClose() {
@@ -336,17 +355,9 @@ func (c *Conn) auth() bool {
 		c.kill(websocket.ClosePolicyViolation, "")
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbWait)
-	defer cancel()
-	token := string(f.Peer)
-	id, exp, err := h.verify(ctx, token)
-	if errors.Is(err, auth.ErrUnauthorized) {
-		c.kill(websocket.ClosePolicyViolation, "unauthorized")
-		return false
-	}
+	id, exp, version, err := h.parse(string(f.Peer))
 	if err != nil {
-		logDB("relay: auth", err)
-		c.kill(websocket.CloseInternalServerErr, "") // banco fora: o app reconecta com espera
+		c.kill(websocket.ClosePolicyViolation, "unauthorized")
 		return false
 	}
 	c.setUser(id)
@@ -356,31 +367,25 @@ func (c *Conn) auth() bool {
 		h.beforeRegister()
 	}
 	h.register(c, nil)
+	if h.afterRegister != nil {
+		h.afterRegister()
+	}
 	if h.cl != nil { // cluster: o que outra instância publicar daqui em diante já chega a esta conexão
 		h.cl.wait(id, subWait)
 	}
-	// Corte do backlog logo depois do register: o que for gravado daqui em diante já sai ao vivo; sem o corte, tudo que
-	// chegasse durante o Auth sairia em dobro.
-	cutoff, err := h.store.maxID(ctx, id)
-	if err != nil {
-		logDB("relay: auth", err)
-		c.kill(websocket.CloseInternalServerErr, "")
-		return false
-	}
-	// Amigos e token relidos depois do register: um ReloadFriends ou Kick que comitou antes dele não acharia esta
-	// conexão.
-	if h.reload(c.u, id) != nil {
-		c.kill(websocket.CloseInternalServerErr, "")
-		return false
-	}
-	if _, _, err := h.verify(ctx, token); errors.Is(err, auth.ErrUnauthorized) {
+	// Versão do token, corte do backlog e amigos lidos depois do register: um Kick ou ReloadFriends que comitou antes
+	// dele não acharia esta conexão, e o que for gravado depois do corte já sai ao vivo (sem o corte, sairia em dobro).
+	cutoff, err := h.session(c.u, id, version)
+	if errors.Is(err, errRevoked) {
 		c.kill(websocket.ClosePolicyViolation, "unauthorized")
 		return false
-	} else if err != nil {
+	}
+	if err != nil {
 		logDB("relay: auth", err)
-		c.kill(websocket.CloseInternalServerErr, "")
+		c.kill(websocket.CloseInternalServerErr, "") // banco fora: o app reconecta com espera
 		return false
 	}
+	close(c.ready)
 	go c.backlog(cutoff)
 	return true
 }
@@ -399,7 +404,7 @@ func (c *Conn) finish() {
 func (c *Conn) backlog(upTo int64) {
 	var after int64
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), dbWait)
+		ctx, cancel := context.WithTimeout(context.Background(), c.hub.dbWait)
 		page, err := c.hub.store.page(ctx, c.user, after, upTo, pageSize)
 		cancel()
 		if err != nil {
@@ -462,7 +467,7 @@ func (c *Conn) envelope(f wire.Frame) {
 		c.sendError("forbidden")
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbWait)
+	ctx, cancel := context.WithTimeout(context.Background(), c.hub.dbWait)
 	fresh, err := c.hub.store.insert(ctx, string(f.Peer), c.user, string(f.MsgID), f.Payload)
 	cancel()
 	if err != nil {
@@ -479,7 +484,7 @@ func (c *Conn) ack(f wire.Frame) {
 		c.sendError("bad_frame")
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dbWait)
+	ctx, cancel := context.WithTimeout(context.Background(), c.hub.dbWait)
 	err := c.hub.store.ack(ctx, c.user, string(f.Peer), string(f.MsgID))
 	cancel()
 	if err != nil {

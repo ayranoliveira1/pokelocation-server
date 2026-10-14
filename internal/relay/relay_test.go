@@ -33,7 +33,7 @@ type env struct {
 
 var codeSeq atomic.Int32
 
-// Token de teste = id do usuário; "ruim" e qualquer coisa que não seja uuid → ErrUnauthorized.
+// Token de teste = id do usuário, sempre com tv 0; o que não for uuid → ErrUnauthorized.
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	t.Parallel()
@@ -44,17 +44,17 @@ func newEnv(t *testing.T) *env {
 func newEnvPool(t *testing.T, pool *pgxpool.Pool) *env {
 	t.Helper()
 	e := &env{t: t, pool: pool, locs: make(chan string, 16)}
-	verify := func(_ context.Context, tok string) (string, time.Time, error) {
+	parse := func(tok string) (string, time.Time, int, error) {
 		if len(tok) != 36 {
-			return "", time.Time{}, auth.ErrUnauthorized
+			return "", time.Time{}, 0, auth.ErrUnauthorized
 		}
 		exp := time.Now().Add(time.Hour)
 		if v, ok := e.exp.Load(tok); ok {
 			exp = v.(time.Time)
 		}
-		return tok, exp, nil
+		return tok, exp, 0, nil
 	}
-	e.hub = New(e.pool, verify, func(c *Conn, f wire.Frame) {
+	e.hub = New(e.pool, parse, func(c *Conn, f wire.Frame) {
 		e.locs <- fmt.Sprintf("%s %d %s", c.User(), f.Type, f.Payload)
 	})
 	e.hub.authWait = 300 * time.Millisecond
@@ -637,4 +637,100 @@ func TestFanOutSlowRecipient(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestRESTDeadline(t *testing.T) {
+	e := newEnv(t)
+	e.hub.dbWait = 300 * time.Millisecond
+	a, b := e.user(), e.user()
+	ctx := context.Background()
+	var id string
+	if err := e.pool.QueryRow(ctx, `INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload)
+		VALUES ($1, $2, 'm', 'x') RETURNING id::text`, b, a).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM envelopes FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if w := e.rest("POST", "/v1/envelopes/ack", b, `{"ids":["`+id+`"]}`); w.Code != 503 {
+		t.Fatalf("ack com a linha travada: %d", w.Code)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("esperou %v", d)
+	}
+}
+
+// LIMIT defensivo: a lista em memória nunca passa de maxFriendsRead, mesmo com dado fora da regra do friends.
+func TestFriendsLimit(t *testing.T) {
+	e := newEnv(t)
+	a := e.user()
+	if _, err := e.pool.Exec(context.Background(), `WITH u AS (
+			INSERT INTO users (email, friend_code) SELECT 'lim' || g || '@ex.com', 'Z' || lpad(g::text, 7, '0')
+			FROM generate_series(1, $2::int) g RETURNING id)
+		INSERT INTO friendships (requester_id, addressee_id, status) SELECT $1, id, 'accepted' FROM u`,
+		a, maxFriendsRead+5); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := e.hub.store.friends(context.Background(), a)
+	if err != nil || len(ids) != maxFriendsRead {
+		t.Fatalf("%d amigos, %v", len(ids), err)
+	}
+}
+
+// Token com tv antigo (logout, reuso de refresh ou vínculo comitado antes do Auth): recusado na consulta do Auth.
+func TestRevokedTokenVersion(t *testing.T) {
+	e := newEnv(t)
+	a := e.user()
+	if _, err := e.pool.Exec(context.Background(), `UPDATE users SET token_version = 1 WHERE id = $1`, a); err != nil {
+		t.Fatal(err)
+	}
+	c := e.connect(a)
+	c.wantError("unauthorized")
+	c.wantClose(websocket.ClosePolicyViolation)
+	e.waitOnline(a, 0)
+}
+
+func TestCleanupBatches(t *testing.T) {
+	e := newEnv(t)
+	a, b := e.user(), e.user()
+	ctx := context.Background()
+	if _, err := e.pool.Exec(ctx, `INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload, created_at)
+		SELECT $1::uuid, $2::uuid, 'velho' || g, 'x'::bytea, now() - interval '31 days' FROM generate_series(1, $3::int) g
+		UNION ALL SELECT $1::uuid, $2::uuid, 'novo', 'x', now()`, b, a, 2*cleanupBatch+500); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.hub.Cleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.count(`SELECT count(*) FROM envelopes`); n != 1 || e.count(`SELECT count(*) FROM envelopes WHERE client_msg_id = 'novo'`) != 1 {
+		t.Fatalf("sobraram %d", n)
+	}
+}
+
+// Token revogado (tv velho) entra no registro antes da consulta de versão: o que chegar para ele nesse meio não pode
+// sair para o socket; só o Error{unauthorized} e o close.
+func TestRevokedSeesNothing(t *testing.T) {
+	e := newEnv(t)
+	a, b := e.user(), e.user()
+	e.friends(a, b)
+	e.online(b)
+	if _, err := e.pool.Exec(context.Background(), `UPDATE users SET token_version = 1 WHERE id = $1`, a); err != nil {
+		t.Fatal(err)
+	}
+	e.hub.afterRegister = func() {
+		env := getOut()
+		env.b = wire.AppendEnvelope(env.b, []byte(b), []byte("m1"), []byte("cifrado"))
+		e.hub.deliver([]byte(a), env, false)
+		env.release()
+		e.hub.SendFriends(b, wire.AppendLocationUpdate(Buf(), []byte(b), []byte("pos")))
+	}
+	c := e.connect(a)
+	c.wantError("unauthorized")
+	c.wantClose(websocket.ClosePolicyViolation)
 }

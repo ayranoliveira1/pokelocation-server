@@ -178,21 +178,30 @@ func (s *Service) accessToken(userID string, tv int) (string, error) {
 	}, &tv}).SignedString(s.key)
 }
 
-func (s *Service) verify(ctx context.Context, token string) (string, time.Time, error) {
+// parse não lê o banco: a revogação (tv ≠ token_version) fica para quem chama.
+func (s *Service) parse(token string) (string, time.Time, int, error) {
 	var c claims
 	_, err := jwt.ParseWithClaims(token, &c, func(*jwt.Token) (any, error) { return s.key.Public(), nil },
 		jwt.WithValidMethods([]string{"EdDSA"}), jwt.WithExpirationRequired(), jwt.WithTimeFunc(s.now))
 	if err != nil || c.Subject == "" || c.TV == nil {
-		return "", time.Time{}, errUnauthorized
+		return "", time.Time{}, 0, errUnauthorized
 	}
-	v, err := s.store.version(ctx, c.Subject)
-	if errors.Is(err, errNotFound) || err == nil && v != *c.TV {
+	return c.Subject, c.ExpiresAt.Time, *c.TV, nil
+}
+
+func (s *Service) verify(ctx context.Context, token string) (string, time.Time, error) {
+	id, exp, tv, err := s.parse(token)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	v, err := s.store.version(ctx, id)
+	if errors.Is(err, errNotFound) || err == nil && v != tv {
 		return "", time.Time{}, errUnauthorized
 	}
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	return c.Subject, c.ExpiresAt.Time, nil
+	return id, exp, nil
 }
 
 var b64 = base64.RawStdEncoding

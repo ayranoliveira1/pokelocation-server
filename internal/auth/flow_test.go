@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -536,25 +537,44 @@ func TestCleanup(t *testing.T) {
 	}
 }
 
-func TestVerify(t *testing.T) {
+// ParseAccess não lê o banco: a versão volta para quem chama comparar com token_version (o WS, depois do register).
+func TestParseAccess(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	tr := e.register("vera@ex.com")
-	ctx := context.Background()
-	uid, exp, err := e.h.Verify(ctx, tr.Access)
-	if err != nil || uid != e.me(tr.Access).ID {
-		t.Fatalf("Verify: %q %v", uid, err)
+	uid, exp, tv, err := e.h.ParseAccess(tr.Access)
+	if err != nil || uid != e.me(tr.Access).ID || tv != 0 {
+		t.Fatalf("ParseAccess: %q %d %v", uid, tv, err)
 	}
 	if d := time.Until(exp); d < 14*time.Minute || d > 15*time.Minute {
 		t.Fatalf("exp em %v", d)
 	}
-	if _, _, err := e.h.Verify(ctx, "lixo"); err != ErrUnauthorized {
-		t.Fatalf("lixo: %v", err)
-	}
 	b, _ := json.Marshal(map[string]string{"refresh_token": tr.Refresh})
 	e.post("/v1/auth/logout", string(b))
-	if _, _, err := e.h.Verify(ctx, tr.Access); err != ErrUnauthorized {
-		t.Fatalf("depois do logout: %v", err)
+	r2 := wantTokens(t, e.post("/v1/auth/login", cred("vera@ex.com", "senha-forte-1")), 200)
+	if _, _, tv, err := e.h.ParseAccess(r2.Access); err != nil || tv != 1 {
+		t.Fatalf("depois do logout: tv %d %v", tv, err)
+	}
+
+	future := jwt.NewNumericDate(time.Now().Add(time.Hour))
+	zero := 0
+	sign := func(m jwt.SigningMethod, key any, c claims) string {
+		s, _ := jwt.NewWithClaims(m, c).SignedString(key)
+		return s
+	}
+	k := e.h.svc.key
+	for name, tok := range map[string]string{
+		"lixo":        "lixo",
+		"alg none":    sign(jwt.SigningMethodNone, jwt.UnsafeAllowNoneSignatureType, claims{jwt.RegisteredClaims{Subject: uid, ExpiresAt: future}, &zero}),
+		"outra chave": sign(jwt.SigningMethodEdDSA, keyOnlyHandler(t).svc.key, claims{jwt.RegisteredClaims{Subject: uid, ExpiresAt: future}, &zero}),
+		"vencido":     sign(jwt.SigningMethodEdDSA, k, claims{jwt.RegisteredClaims{Subject: uid, ExpiresAt: jwt.NewNumericDate(time.Now().Add(-time.Minute))}, &zero}),
+		"sem exp":     sign(jwt.SigningMethodEdDSA, k, claims{jwt.RegisteredClaims{Subject: uid}, &zero}),
+		"sem sub":     sign(jwt.SigningMethodEdDSA, k, claims{jwt.RegisteredClaims{ExpiresAt: future}, &zero}),
+		"sem tv":      sign(jwt.SigningMethodEdDSA, k, claims{jwt.RegisteredClaims{Subject: uid, ExpiresAt: future}, nil}),
+	} {
+		if _, _, _, err := e.h.ParseAccess(tok); err != ErrUnauthorized {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 
@@ -757,5 +777,49 @@ func TestHooks(t *testing.T) {
 	var n int
 	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM envelopes`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("envelopes: %d %v", n, err)
+	}
+}
+
+// Banco travado: o handler desiste no prazo dele em vez de segurar a requisição.
+func TestRequestDeadline(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	r := e.register("prazo@ex.com")
+	e.h.reqWait = 300 * time.Millisecond // depois do register: o argon2 sob -race passa disso
+	e.mux = http.NewServeMux()
+	e.h.Routes(e.mux, e.h.Authed)
+	ctx := context.Background()
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `UPDATE users SET token_version = token_version WHERE email = 'prazo@ex.com'`); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	b, _ := json.Marshal(map[string]string{"refresh_token": r.Refresh})
+	wantErr(t, e.post("/v1/auth/refresh", string(b)), 503, "unavailable")
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("esperou %v", d)
+	}
+}
+
+func TestCleanupBatches(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	id := e.me(e.register("lote@ex.com").Access).ID
+	ctx := context.Background()
+	if _, err := e.pool.Exec(ctx, `INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
+		SELECT $1, gen_random_uuid(), sha256(('lote' || g)::bytea), now() - interval '1 day'
+		FROM generate_series(1, $2::int) g`, id, 2*cleanupBatch+500); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.h.Cleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := e.pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("sobraram %d (%v)", n, err)
 	}
 }

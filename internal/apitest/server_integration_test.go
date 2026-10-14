@@ -76,6 +76,11 @@ func startWith(t testing.TB, redisURL string) *server {
 	t.Helper()
 	pool := testdb.Pool(t)
 	buildOnce.Do(func() {
+		// APITEST_SERVER_BIN: testa um binário já compilado (ex.: o HEAD, quando a árvore está no meio de uma mudança).
+		if b := os.Getenv("APITEST_SERVER_BIN"); b != "" {
+			binPath = b
+			return
+		}
 		args := []string{"build", "-o", binPath}
 		if raceOn {
 			args = append(args, "-race")
@@ -281,7 +286,7 @@ type user struct{ id, email, password, code, access, refresh string }
 // register conta no limite de 5/min por email.
 func (s *server) register(name string) user {
 	s.t.Helper()
-	u := user{email: name + "@teste.dev", password: "senha-" + rand.Text()}
+	u := user{email: name + "." + strings.ToLower(rand.Text()[:10]) + "@teste.dev", password: "senha-" + rand.Text()}
 	r := s.do("POST", "/v1/auth/register", "", map[string]string{"email": u.email, "password": u.password})
 	s.want(r, 201, "")
 	u.access, u.refresh = r.str("access_token"), r.str("refresh_token")

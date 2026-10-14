@@ -31,7 +31,11 @@ type Config struct {
 	PublicURL          string // https://<host> como o navegador vê: base do redirect_uri do Google
 }
 
-const maxBody = 4 << 10
+const (
+	maxBody    = 4 << 10
+	reqWait    = 5 * time.Second
+	googleWait = 15 * time.Second // o callback espera o endpoint de token do Google (até 10 s) e o banco
+)
 
 type Handler struct {
 	// Chamados depois do commit, para o WebSocket derrubar o revogado e recarregar as listas de amigos.
@@ -40,6 +44,7 @@ type Handler struct {
 
 	svc       *Service
 	ip, email *ratelimit.Limiter
+	reqWait   time.Duration // campo para o teste encurtar
 }
 
 func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
@@ -56,7 +61,7 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		argon: make(chan struct{}, 2*runtime.NumCPU()),
 	}
 	s.google = s.googleIdentity
-	h := &Handler{svc: s, ip: ratelimit.New(5), email: ratelimit.New(5)}
+	h := &Handler{svc: s, ip: ratelimit.New(5), email: ratelimit.New(5), reqWait: reqWait}
 	s.notify = h.notify
 	if s.dummy, err = s.hashPassword(context.Background(), rand.Text()); err != nil {
 		return nil, err
@@ -76,23 +81,24 @@ func (h *Handler) notify(user string, exFriends []string) {
 }
 
 func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
-	mux.HandleFunc("POST /v1/auth/register", h.register)
-	mux.HandleFunc("POST /v1/auth/login", h.login)
-	mux.HandleFunc("POST /v1/auth/refresh", h.refresh)
-	mux.HandleFunc("POST /v1/auth/logout", h.logout)
-	mux.HandleFunc("GET /v1/auth/google/start", h.googleStart)
-	mux.HandleFunc("GET /v1/auth/google/callback", h.googleCallback)
-	mux.HandleFunc("POST /v1/auth/google/exchange", h.googleExchange)
-	mux.Handle("GET /v1/me", authed(h.me))
+	d := h.reqWait
+	mux.HandleFunc("POST /v1/auth/register", httpx.Timed(d, h.register))
+	mux.HandleFunc("POST /v1/auth/login", httpx.Timed(d, h.login))
+	mux.HandleFunc("POST /v1/auth/refresh", httpx.Timed(d, h.refresh))
+	mux.HandleFunc("POST /v1/auth/logout", httpx.Timed(d, h.logout))
+	mux.HandleFunc("GET /v1/auth/google/start", httpx.Timed(d, h.googleStart))
+	mux.HandleFunc("GET /v1/auth/google/callback", httpx.Timed(googleWait, h.googleCallback))
+	mux.HandleFunc("POST /v1/auth/google/exchange", httpx.Timed(d, h.googleExchange))
+	mux.Handle("GET /v1/me", authed(httpx.Timed(d, h.me)))
 }
 
 // Cleanup apaga os refresh tokens vencidos.
 func (h *Handler) Cleanup(ctx context.Context) error { return h.svc.store.cleanup(ctx, h.svc.now()) }
 
-// Verify devolve o dono e o vencimento do access token. Inválido, vencido ou revogado → ErrUnauthorized; outro erro =
-// banco fora.
-func (h *Handler) Verify(ctx context.Context, token string) (userID string, exp time.Time, err error) {
-	return h.svc.verify(ctx, token)
+// ParseAccess valida o access token sem ir ao banco (ErrUnauthorized se inválido ou vencido). Quem chama tem de
+// comparar version com users.token_version: só assim a revogação vale.
+func (h *Handler) ParseAccess(token string) (userID string, exp time.Time, version int, err error) {
+	return h.svc.parse(token)
 }
 
 // Authed exige um Bearer válido e põe o id do usuário no contexto (httpx.User).
@@ -103,7 +109,9 @@ func (h *Handler) Authed(next http.HandlerFunc) http.Handler {
 			httpx.Error(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		uid, _, err := h.svc.verify(r.Context(), token)
+		ctx, cancel := context.WithTimeout(r.Context(), h.reqWait)
+		uid, _, err := h.svc.verify(ctx, token)
+		cancel()
 		if err != nil {
 			h.fail(w, err)
 			return

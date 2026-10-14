@@ -3,6 +3,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -30,21 +31,27 @@ const (
 	pageSize   = 50
 	pageBytes  = 48 << 10 // o app lê no máximo 64 KiB por resposta
 	maxAckIDs  = 100
-	pingEvery  = 30 * time.Second
-	idleWait   = 70 * time.Second // dois pings sem resposta
-	writeWait  = 10 * time.Second
-	dbWait     = 5 * time.Second
+	// maxFriendsRead: teto de 500 amigos do friends, com folga; dado fora da regra não vira lista sem fim.
+	maxFriendsRead = 1000
+	pingEvery      = 30 * time.Second
+	idleWait       = 70 * time.Second // dois pings sem resposta
+	writeWait      = 10 * time.Second
+	dbWait         = 5 * time.Second
+	cleanupBatch   = 1000
+	batchWait      = 5 * time.Second
 )
 
 type Hub struct {
 	store      *Store
-	verify     func(ctx context.Context, token string) (string, time.Time, error)
+	parse      func(token string) (user string, exp time.Time, version int, err error)
 	onLocation func(c *Conn, f wire.Frame)
 	up         websocket.Upgrader
 	shards     [shardCount]shard
-	authWait   time.Duration // campo para o teste encurtar
+	authWait   time.Duration // campos para o teste encurtar
+	dbWait     time.Duration
 	// beforeRegister: gancho de teste (nil em produção).
 	beforeRegister func()
+	afterRegister  func()
 	cl             *cluster // nil = uma instância só (EnableCluster liga)
 }
 
@@ -61,25 +68,47 @@ type user struct {
 	reload  sync.Mutex
 }
 
-// friendSet: imutável; o ReloadFriends troca o conjunto inteiro.
+// friendSet: imutável (o ReloadFriends troca o conjunto inteiro). UUIDs canônicos de 36 bytes, ordenados, num blob
+// só: 36 B por amigo, sem map nem cabeçalho de slice. Busca binária no Envelope; a posição só itera.
 type friendSet struct {
-	ids [][]byte
-	has map[string]struct{}
+	blob []byte
 }
+
+const idLen = 36
 
 func newFriendSet(ids []string) *friendSet {
-	fs := &friendSet{ids: make([][]byte, len(ids)), has: make(map[string]struct{}, len(ids))}
-	for i, id := range ids {
-		fs.ids[i] = []byte(id)
-		fs.has[id] = struct{}{}
+	s := slices.Compact(slices.Sorted(slices.Values(ids)))
+	blob := make([]byte, 0, len(s)*idLen)
+	for _, id := range s {
+		if len(id) == idLen {
+			blob = append(blob, id...)
+		}
 	}
-	return fs
+	return &friendSet{blob: blob}
 }
 
-// New: onLocation recebe os frames Location e LocationOff do cliente.
-func New(pool *pgxpool.Pool, verify func(ctx context.Context, token string) (string, time.Time, error),
+func (fs *friendSet) len() int { return len(fs.blob) / idLen }
+
+func (fs *friendSet) id(i int) []byte { return fs.blob[i*idLen : (i+1)*idLen : (i+1)*idLen] }
+
+func (fs *friendSet) has(peer []byte) bool {
+	lo, hi := 0, fs.len()
+	for lo < hi {
+		m := int(uint(lo+hi) >> 1)
+		if bytes.Compare(fs.id(m), peer) < 0 {
+			lo = m + 1
+		} else {
+			hi = m
+		}
+	}
+	return lo < fs.len() && bytes.Equal(fs.id(lo), peer)
+}
+
+// New: parse é o auth.Handler.ParseAccess (sem banco; a versão é conferida na consulta do Auth). onLocation recebe os
+// frames Location e LocationOff do cliente.
+func New(pool *pgxpool.Pool, parse func(token string) (string, time.Time, int, error),
 	onLocation func(c *Conn, f wire.Frame)) *Hub {
-	h := &Hub{store: &Store{pool: pool}, verify: verify, onLocation: onLocation, authWait: 5 * time.Second}
+	h := &Hub{store: &Store{pool: pool}, parse: parse, onLocation: onLocation, authWait: 5 * time.Second, dbWait: dbWait}
 	h.up = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -240,8 +269,8 @@ func (h *Hub) sendFriends(id string, ob *outBuf) {
 	}
 	s.mu.Unlock()
 	if fs != nil {
-		for _, f := range fs.ids {
-			h.deliver(f, ob, true)
+		for i := range fs.len() {
+			h.deliver(fs.id(i), ob, true)
 		}
 	}
 	ob.release()
@@ -275,10 +304,30 @@ func (h *Hub) reloadLocal(id string) {
 	}
 }
 
+var errRevoked = errors.New("relay: token revogado")
+
+// session: a consulta única do Auth, depois do register e sob u.reload (como o reload). Recusa o token se a versão
+// dele não é a atual; devolve o corte do backlog.
+func (h *Hub) session(u *user, id string, version int) (int64, error) {
+	u.reload.Lock()
+	defer u.reload.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), h.dbWait)
+	defer cancel()
+	current, cutoff, ids, err := h.store.session(ctx, id)
+	if errors.Is(err, errNoUser) || err == nil && current != version {
+		return 0, errRevoked
+	}
+	if err != nil {
+		return 0, err
+	}
+	u.friends.Store(newFriendSet(ids))
+	return cutoff, nil
+}
+
 func (h *Hub) reload(u *user, id string) error {
 	u.reload.Lock()
 	defer u.reload.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), dbWait)
+	ctx, cancel := context.WithTimeout(context.Background(), h.dbWait)
 	defer cancel()
 	ids, err := h.store.friends(ctx, id)
 	if err != nil {
@@ -310,11 +359,14 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(readLimit)
 	c := newConn(h, ws)
 	go c.writeLoop()
-	c.readLoop()
+	// Fora do handler: enquanto ele não retorna, o net/http segura os bufio de 4 KB e a pilha da conexão hijacked.
+	go c.readLoop()
 }
 
 func (h *Hub) listEnvelopes(w http.ResponseWriter, r *http.Request) {
-	page, err := h.store.page(r.Context(), httpx.User(r.Context()), 0, math.MaxInt64, pageSize)
+	ctx, cancel := context.WithTimeout(r.Context(), h.dbWait)
+	defer cancel()
+	page, err := h.store.page(ctx, httpx.User(r.Context()), 0, math.MaxInt64, pageSize)
 	if err != nil {
 		httpx.DBError(w, "relay", err)
 		return
@@ -354,7 +406,9 @@ func (h *Hub) ackEnvelopes(w http.ResponseWriter, r *http.Request) {
 		}
 		ids[i] = n
 	}
-	if err := h.store.ackIDs(r.Context(), httpx.User(r.Context()), ids); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), h.dbWait)
+	defer cancel()
+	if err := h.store.ackIDs(ctx, httpx.User(r.Context()), ids); err != nil {
 		httpx.DBError(w, "relay", err)
 		return
 	}

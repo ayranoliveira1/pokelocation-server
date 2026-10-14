@@ -73,3 +73,32 @@ func TestQueue(t *testing.T) {
 		t.Fatal("push depois do kill deveria ser ignorado")
 	}
 }
+
+func TestFriendSet(t *testing.T) {
+	ids := []string{
+		"c0000000-0000-0000-0000-000000000003", "a0000000-0000-0000-0000-000000000001",
+		"b0000000-0000-0000-0000-000000000002", "a0000000-0000-0000-0000-000000000001",
+	}
+	fs := newFriendSet(ids)
+	if fs.len() != 3 {
+		t.Fatalf("len %d", fs.len())
+	}
+	for i := 1; i < fs.len(); i++ {
+		if string(fs.id(i-1)) >= string(fs.id(i)) {
+			t.Fatal("fora de ordem")
+		}
+	}
+	for _, id := range ids {
+		if !fs.has([]byte(id)) {
+			t.Errorf("sem %s", id)
+		}
+	}
+	for _, id := range []string{"", "0", "a0000000-0000-0000-0000-000000000000", "d0000000-0000-0000-0000-000000000000"} {
+		if fs.has([]byte(id)) {
+			t.Errorf("tem %q", id)
+		}
+	}
+	if e := newFriendSet(nil); e.len() != 0 || e.has([]byte(ids[0])) {
+		t.Fatal("vazio")
+	}
+}

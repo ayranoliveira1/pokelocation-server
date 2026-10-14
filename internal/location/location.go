@@ -22,11 +22,13 @@ import (
 )
 
 const (
-	minGap     = 4 * time.Second  // 1 a cada 5 s com folga de 1 s
-	ttl        = 60 * time.Second // loc:{id}
-	flushEvery = time.Second
-	maxJSON    = 256 << 10 // GET /v1/locations: o app lê até 256 KiB; passou → 413
-	shards     = 64
+	minGap       = 4 * time.Second  // 1 a cada 5 s com folga de 1 s
+	ttl          = 60 * time.Second // loc:{id}
+	flushEvery   = time.Second
+	reqWait      = 5 * time.Second // abaixo do statement_timeout do pool, que é só a rede de segurança
+	friendsLimit = 600             // LIMIT defensivo acima do teto de 500 amigos
+	maxJSON      = 256 << 10       // GET /v1/locations: o app lê até 256 KiB; passou → 413
+	shards       = 64
 )
 
 type pending uint8
@@ -56,13 +58,14 @@ type shard struct {
 }
 
 type Service struct {
-	rdb    *redis.Client
-	pool   *pgxpool.Pool
-	send   func(user string, frame []byte) // hub.SendFriends: a posse do frame passa ao hub
-	buf    func() []byte                   // relay.Buf
-	now    func() time.Time
-	shards [shards]shard
-	down   atomic.Bool // Redis falhou no último flush (loga 1 vez por sequência)
+	rdb     *redis.Client
+	pool    *pgxpool.Pool
+	send    func(user string, frame []byte) // hub.SendFriends: a posse do frame passa ao hub
+	buf     func() []byte                   // relay.Buf
+	now     func() time.Time
+	shards  [shards]shard
+	down    atomic.Bool // Redis falhou no último flush (loga 1 vez por sequência)
+	reqWait time.Duration
 }
 
 func New(rdb *redis.Client, pool *pgxpool.Pool, hub *relay.Hub) *Service {
@@ -75,7 +78,7 @@ func New(rdb *redis.Client, pool *pgxpool.Pool, hub *relay.Hub) *Service {
 func (s *Service) OnFrame(c *relay.Conn, f wire.Frame) { s.handle(c.User(), f) }
 
 func newService(rdb *redis.Client, pool *pgxpool.Pool, send func(string, []byte)) *Service {
-	s := &Service{rdb: rdb, pool: pool, send: send, now: time.Now, buf: func() []byte { return nil }}
+	s := &Service{rdb: rdb, pool: pool, send: send, now: time.Now, buf: func() []byte { return nil }, reqWait: reqWait}
 	for i := range s.shards {
 		s.shards[i].m = map[string]*user{}
 	}
@@ -203,7 +206,7 @@ func (s *Service) users() int {
 }
 
 func (s *Service) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
-	mux.Handle("GET /v1/locations", authed(s.locations))
+	mux.Handle("GET /v1/locations", authed(httpx.Timed(s.reqWait, s.locations)))
 }
 
 type entry struct {
@@ -222,7 +225,8 @@ func (s *Service) locations(w http.ResponseWriter, r *http.Request) {
 		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
 		WHERE f.status = 'accepted' AND (f.requester_id = $1 OR f.addressee_id = $1)
 		AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
-			OR (b.blocker_id = u.id AND b.blocked_id = $1))`, httpx.User(ctx))
+			OR (b.blocker_id = u.id AND b.blocked_id = $1))
+		LIMIT $2`, httpx.User(ctx), friendsLimit)
 	if err != nil {
 		httpx.DBError(w, "location", err)
 		return
