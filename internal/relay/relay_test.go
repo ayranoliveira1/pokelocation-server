@@ -736,21 +736,44 @@ func TestRevokedSeesNothing(t *testing.T) {
 	c.wantClose(websocket.ClosePolicyViolation)
 }
 
-// Conexão ociosa: só a goroutine de leitura (o escritor sobe sob demanda).
+// relayGoroutines conta, pelo stack, só as goroutines das conexões do relay (o resto do processo não interessa).
+func relayGoroutines() (readers, writers, backlogs int) {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		if strings.Contains(g, "relay.(*Conn).readLoop") {
+			readers++
+		}
+		if strings.Contains(g, "relay.(*Conn).flush") {
+			writers++
+		}
+		if strings.Contains(g, "relay.(*Conn).backlog") {
+			backlogs++
+		}
+	}
+	return readers, writers, backlogs
+}
+
+// Conexão ociosa: só a goroutine de leitura; nenhum escritor nem backlog sobra depois de esvaziar a fila. Sem t.Parallel: as
+// conexões de outros testes também têm readLoop.
 func TestIdleConnGoroutines(t *testing.T) {
-	e := newEnv(t)
+	e := newEnvPool(t, testdb.Pool(t))
 	const n = 50
-	ids := make([]string, n)
-	for i := range ids {
-		ids[i] = e.user()
+	for range n {
+		e.online(e.user()) // a resposta bad_frame sobe e derruba um escritor em cada uma
 	}
-	time.Sleep(100 * time.Millisecond)
-	g0 := runtime.NumGoroutine()
-	for _, id := range ids {
-		e.online(id)
+	var r, w, b int
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if r, w, b = relayGoroutines(); r == n && w == 0 && b == 0 {
+			return
+		}
 	}
-	time.Sleep(300 * time.Millisecond) // escritores da resposta bad_frame terminam
-	if d := runtime.NumGoroutine() - g0; d > n+10 {
-		t.Fatalf("%d goroutines para %d conexões ociosas", d, n)
-	}
+	t.Fatalf("%d leitores, %d escritores e %d backlogs para %d conexões ociosas", r, w, b, n)
 }

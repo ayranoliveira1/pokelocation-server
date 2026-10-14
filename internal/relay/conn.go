@@ -296,7 +296,12 @@ func (c *Conn) sendPing() {
 		c.kill(0, "")
 		return
 	}
-	c.ping.Reset(pingEvery)
+	// sob q.mu: um shutdown concorrente já marcou closing e não pode ver o timer rearmado depois do Stop
+	c.q.mu.Lock()
+	if !c.q.closing {
+		c.ping.Reset(pingEvery)
+	}
+	c.q.mu.Unlock()
 }
 
 func (c *Conn) shutdown() {
