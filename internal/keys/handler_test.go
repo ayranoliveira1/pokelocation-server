@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -28,6 +29,7 @@ type env struct {
 	t    *testing.T
 	pool *pgxpool.Pool
 	mux  *http.ServeMux
+	h    *Handler
 }
 
 func newEnv(t *testing.T) *env {
@@ -35,8 +37,9 @@ func newEnv(t *testing.T) *env {
 	t.Parallel()
 	pool := testdb.Pool(t)
 	mux := http.NewServeMux()
-	New(pool).Routes(mux, func(h http.HandlerFunc) http.Handler { return h })
-	return &env{t, pool, mux}
+	h := New(pool)
+	h.Routes(mux, func(h http.HandlerFunc) http.Handler { return h })
+	return &env{t, pool, mux, h}
 }
 
 func (e *env) user() string {
@@ -449,4 +452,27 @@ func TestFetchRateLimit(t *testing.T) {
 	if ec, ky := e.count(a); ec != 9 || ky != 9 {
 		t.Fatalf("recusa consumiu chaves: %d/%d, want 9/9", ec, ky)
 	}
+}
+
+// O take consome pela ordem de key_id (o índice único entrega essa ordem sem ordenar), não pela de inserção.
+func TestFetchOrderByKeyID(t *testing.T) {
+	e := newEnv(t)
+	a, b := e.user(), e.user()
+	e.friends(a, b)
+	idA := ec()
+	e.put(a, mkBundle(idA, 50, 1, 50, 1))
+	e.put(a, mkBundle(idA, 10, 1, 10, 1)) // inserida depois, key_id menor
+	g := e.fetch(b, a)
+	if id(*g.OneTimePrekey) != 10 || id(g.KyberPrekey) != 10 {
+		t.Fatalf("take: EC %d, Kyber %d; want 10 e 10 (menor key_id)", id(*g.OneTimePrekey), id(g.KyberPrekey))
+	}
+}
+
+func TestDeadline(t *testing.T) {
+	e := newEnv(t)
+	a := e.user()
+	e.h.reqWait = time.Nanosecond
+	e.want(a, "GET", "/v1/keys/count", nil, 503, "unavailable")
+	e.want(a, "PUT", "/v1/keys", mkBundle(ec(), 0, 1, 0, 1).json(), 503, "unavailable")
+	e.want(a, "GET", "/v1/keys/"+nobody, nil, 503, "unavailable")
 }

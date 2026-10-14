@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -452,5 +453,28 @@ func TestBlockDropsEnvelopes(t *testing.T) {
 	}
 	if strings.Join(left, ",") != "b→c,c→a" {
 		t.Fatalf("envelopes depois do bloqueio: %v, want só os de terceiros", left)
+	}
+}
+
+// Toda requisição tem prazo: vencido, a query é cancelada e responde 503 (o statement_timeout é só a rede).
+func TestDeadline(t *testing.T) {
+	e := newEnv(t)
+	a := e.user()
+	e.h.reqWait = time.Nanosecond
+	e.want(a, "GET", "/v1/friends", "", 503, "unavailable")
+	e.want(a, "POST", "/v1/blocks/"+nobody, "", 503, "unavailable")
+}
+
+// LIMIT defensivo acima dos tetos (500 amigos + 2×50 pedidos): a lista nunca passa de listLimit linhas.
+func TestListLimit(t *testing.T) {
+	e := newEnv(t)
+	a := e.user()
+	e.exec(`WITH x AS (
+		INSERT INTO users (email, friend_code)
+		SELECT gen_random_uuid()::text || '@x', upper(substr(md5(random()::text), 1, 8)) FROM generate_series(1, $1)
+		RETURNING id)
+		INSERT INTO friendships (requester_id, addressee_id, status) SELECT id, $2, 'accepted' FROM x`, listLimit+5, a.id)
+	if l := e.list(a); len(l.friends) != listLimit {
+		t.Fatalf("lista com %d amigos, want o LIMIT %d", len(l.friends), listLimit)
 	}
 }

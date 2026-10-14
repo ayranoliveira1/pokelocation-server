@@ -191,7 +191,8 @@ func (s *Store) list(ctx context.Context, me string) (List, error) {
 		FROM friendships f
 		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
 		WHERE f.requester_id = $1 OR f.addressee_id = $1
-		ORDER BY f.created_at, f.id`, me)
+		ORDER BY f.created_at, f.id
+		LIMIT $2`, me, listLimit)
 	if err != nil {
 		return l, err
 	}

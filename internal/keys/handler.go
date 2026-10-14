@@ -1,6 +1,7 @@
 package keys
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -21,6 +22,7 @@ const (
 	maxKeyID              = 1<<24 - 1
 	maxPerList            = 100
 	maxBody               = 512 << 10
+	reqWait               = 5 * time.Second
 )
 
 // KeyID é ponteiro para distinguir "faltando" de 0 (válido).
@@ -81,14 +83,15 @@ type fetched struct {
 type Handler struct {
 	store   *Store
 	fetches *ratelimit.Limiter // GET /v1/keys/{userId} por par: um amigo não esvazia as one-time do outro
+	reqWait time.Duration
 }
 
-func New(pool *pgxpool.Pool) *Handler { return &Handler{NewStore(pool), ratelimit.New(10)} }
+func New(pool *pgxpool.Pool) *Handler { return &Handler{NewStore(pool), ratelimit.New(10), reqWait} }
 
 func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
-	mux.Handle("PUT /v1/keys", authed(h.put))
-	mux.Handle("GET /v1/keys/count", authed(h.count))
-	mux.Handle("GET /v1/keys/{userId}", authed(h.fetch))
+	mux.Handle("PUT /v1/keys", authed(h.timed(h.put)))
+	mux.Handle("GET /v1/keys/count", authed(h.timed(h.count)))
+	mux.Handle("GET /v1/keys/{userId}", authed(h.timed(h.fetch)))
 }
 
 func (h *Handler) put(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +136,15 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, f)
+}
+
+// timed: prazo da requisição inteira; o statement_timeout do pool é só a rede de segurança.
+func (h *Handler) timed(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), h.reqWait)
+		defer cancel()
+		next(w, r.WithContext(ctx))
+	}
 }
 
 func fail(w http.ResponseWriter, err error) {

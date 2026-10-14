@@ -126,8 +126,9 @@ func (s *Store) fetch(ctx context.Context, me, other string) (*fetched, error) {
 		if err != nil {
 			return err
 		}
+		// ORDER BY key_id: o índice único (user_id, kind, key_id) já entrega a ordem; por id o Postgres varria a PK.
 		const take = `DELETE FROM one_time_prekeys WHERE id = (SELECT id FROM one_time_prekeys
-			WHERE user_id = $1 AND kind = $2 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
+			WHERE user_id = $1 AND kind = $2 ORDER BY key_id LIMIT 1 FOR UPDATE SKIP LOCKED)
 			RETURNING key_id, public_key, signature`
 		var ky keyOut
 		err = tx.QueryRow(ctx, take, other, "kyber").Scan(&ky.KeyID, &ky.PublicKey, &ky.Signature)

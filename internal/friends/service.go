@@ -15,6 +15,7 @@ import (
 const (
 	maxFriends = 500
 	maxPending = 50
+	listLimit  = maxFriends + 2*maxPending + 100 // LIMIT defensivo acima dos tetos
 )
 
 var (
