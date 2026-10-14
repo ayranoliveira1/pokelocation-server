@@ -1,4 +1,4 @@
-# Desenvolvimento e base da produção (D1). Só o Caddy fica exposto; Postgres e Redis abrem só em 127.0.0.1 (make run).
+# Desenvolvimento e base da produção. Só o Caddy fica exposto; Postgres e Redis abrem só em 127.0.0.1 (make run).
 # Segredos no .env (veja .env.example).
 services:
   postgres:
@@ -44,7 +44,7 @@ services:
     ports: ["80:80", "443:443"]
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      # .so.gz da libsignal (reserva do GitHub, spec §3.1), gerados por tools/libsignal/prepare.sh no repo do app
+      # .so.gz da libsignal: reserva do download do GitHub, gerados por tools/libsignal/prepare.sh no repo do app
       - ${LIBSIGNAL_DIR:-../pokelocation-social/tools/libsignal/out/0.86.5}:/srv/static/libsignal-0.86.5:ro
       - caddy:/data
     depends_on: [server]

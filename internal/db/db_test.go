@@ -11,7 +11,6 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Postgres real: a migração sobe, é idempotente e as constraints do schema valem.
 func TestMigrate(t *testing.T) {
 	testcontainers.SkipIfProviderIsNotHealthy(t)
 	ctx := context.Background()

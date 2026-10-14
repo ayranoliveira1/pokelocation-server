@@ -14,7 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// cluster: várias instâncias atrás do mesmo Redis (S8; desligado por padrão, CLUSTER=1 no main).
+// cluster: várias instâncias atrás do mesmo Redis.
 //
 // Sem tabela de presença: cada instância assina u:{id} de cada usuário com conexão aqui, e deliver publica todo frame
 // em u:{destinatário}; o Redis só entrega a quem assina (offline = descarte). Kick e ReloadFriends vão a todas por
@@ -33,9 +33,9 @@ type cluster struct {
 	out chan pubMsg
 
 	mu      sync.Mutex
-	touched map[string]struct{}        // usuários que ganharam ou perderam conexão desde o último sync
-	ready   map[string]struct{}        // u:{id} com assinatura confirmada pelo Redis
-	waits   map[string][]chan struct{} // Auth esperando a confirmação
+	touched map[string]struct{}
+	ready   map[string]struct{} // assinatura de u:{id} confirmada pelo Redis
+	waits   map[string][]chan struct{}
 	wake    chan struct{}
 	subs    map[string]struct{} // assinados agora; só a goroutine sync toca
 }
@@ -52,19 +52,19 @@ const (
 	ctlWait    = 2 * time.Second // Kick/Reload: vêm dos handlers HTTP, fora do caminho quente
 	subWait    = time.Second     // Auth esperando a assinatura (Redis fora: segue sem)
 
-	kindLive   byte = 'e' // frame que não se descarta (envelope, ack)
-	kindDrop   byte = 'd' // posição
+	kindLive   byte = 'e'
+	kindDrop   byte = 'd' // posição: pode ser descartada
 	kindKick   byte = 'k'
 	kindReload byte = 'r'
 )
 
-// EnableCluster liga o repasse entre instâncias. Chamar antes de servir; as goroutines param com ctx.
-// Não espera o Redis: com ele fora, cada instância segue servindo os próprios usuários e o go-redis reassina ao voltar.
+// EnableCluster: chamar antes de servir. Não espera o Redis: com ele fora, cada instância segue servindo os próprios
+// usuários e o go-redis reassina ao voltar.
 func (h *Hub) EnableCluster(ctx context.Context, rdb *redis.Client) {
 	h.enableCluster(ctx, rdb, pubQueue, true)
 }
 
-// enableCluster: queue e publisher só mudam no teste (fila sempre cheia, para provar que o controle não depende dela).
+// enableCluster: queue e publisher só mudam no teste.
 func (h *Hub) enableCluster(ctx context.Context, rdb *redis.Client, queue int, publisher bool) {
 	c := &cluster{h: h, rdb: rdb, out: make(chan pubMsg, queue), touched: map[string]struct{}{},
 		ready: map[string]struct{}{}, waits: map[string][]chan struct{}{}, wake: make(chan struct{}, 1),
@@ -80,8 +80,7 @@ func (h *Hub) enableCluster(ctx context.Context, rdb *redis.Client, queue int, p
 	go func() { <-ctx.Done(); _ = c.ps.Close() }()
 }
 
-// frame: depois da entrega local, o mesmo frame para as outras instâncias que tenham user. Copia b (o chamador
-// recicla o buffer).
+// frame copia b: o chamador recicla o buffer.
 func (c *cluster) frame(user, b []byte, droppable bool) {
 	kind := kindLive
 	if droppable {
@@ -90,8 +89,8 @@ func (c *cluster) frame(user, b []byte, droppable bool) {
 	c.publish("u:"+string(user), kind, b)
 }
 
-// ctl: Kick/Reload, direto no Redis e nunca descartado por fila cheia (bloqueio e revogação valem em todas as
-// instâncias). Falhou (Redis fora): o exp do token e a próxima recarga cobrem; fica no log.
+// ctl publica direto, nunca pela fila descartável: bloqueio e revogação têm de valer em todas as instâncias. Com o
+// Redis fora, o exp do token e a próxima recarga cobrem.
 func (c *cluster) ctl(kind byte, user string) {
 	ctx, cancel := context.WithTimeout(context.Background(), ctlWait)
 	defer cancel()
@@ -112,7 +111,6 @@ func (c *cluster) msg(kind byte, body []byte) []byte {
 	return append(append(append(data, c.id[:]...), kind), body...)
 }
 
-// publishLoop manda o que estiver na fila num pipeline só. Loga só a transição ok → falha.
 func (c *cluster) publishLoop(ctx context.Context) {
 	batch := make([]pubMsg, 0, pubBatch)
 	failing := false
@@ -164,7 +162,6 @@ func (c *cluster) receiveLoop(ctx context.Context) {
 	}
 }
 
-// confirmed: o Redis confirmou (ou desfez) a assinatura de u:{id}; libera quem espera no Auth.
 func (c *cluster) confirmed(s *redis.Subscription) {
 	user, ok := strings.CutPrefix(s.Channel, "u:")
 	if !ok {
@@ -182,7 +179,6 @@ func (c *cluster) confirmed(s *redis.Subscription) {
 	delete(c.waits, user)
 }
 
-// wait: espera u:{user} estar assinado de fato (Auth, antes do corte do backlog), até d.
 func (c *cluster) wait(user string, d time.Duration) {
 	c.mu.Lock()
 	if _, ok := c.ready[user]; ok {
@@ -229,7 +225,6 @@ func (c *cluster) receive(channel, p string) {
 	}
 }
 
-// touch: user ganhou ou perdeu conexão aqui; o sync acerta a assinatura de u:{user}.
 func (c *cluster) touch(user string) {
 	c.mu.Lock()
 	c.touched[user] = struct{}{}
@@ -237,7 +232,7 @@ func (c *cluster) touch(user string) {
 	signal(c.wake)
 }
 
-// syncLoop: uma goroutine só (a ordem de assinar/cancelar não se inverte), decidindo pelo estado de agora.
+// syncLoop: uma goroutine só, para a ordem de assinar/cancelar não se inverter; decide pelo estado de agora.
 func (c *cluster) syncLoop(ctx context.Context) {
 	failing := false
 	for {
@@ -266,7 +261,7 @@ func (c *cluster) syncLoop(ctx context.Context) {
 				c.mu.Unlock()
 			}
 		}
-		// erro de rede: o go-redis guarda os canais e reassina ao reconectar; loga só a transição
+		// erro de rede: o go-redis guarda os canais e reassina ao reconectar
 		var err error
 		if len(sub) > 0 {
 			err = c.ps.Subscribe(ctx, sub...)

@@ -1,8 +1,6 @@
-// Package wire: formato binário dos frames do WebSocket (docs/api.md §6), espelhado por social/ws/Frames.java.
-// [tipo u8][campos]; inteiros big-endian; str = u16 + bytes; bin = u32 + bytes; nada sobrando.
-//
-// Caminho quente: Decode fatia o buffer recebido (sem cópia, sem string) e os Append* escrevem num buffer do chamador.
-// Decode + Append de um frame repassado = 0 alocações (TestZeroAllocs).
+// Package wire: frames binários do WebSocket (docs/api.md §6), espelhados por social/ws/Frames.java no app.
+// [tipo u8][campos]; big-endian; str = u16 + bytes; bin = u32 + bytes; nada sobrando.
+// Caminho quente sem alocação: Decode fatia o buffer recebido e os Append* escrevem num buffer do chamador.
 package wire
 
 import (
@@ -11,7 +9,6 @@ import (
 	"math"
 )
 
-// Tipos de frame.
 const (
 	Auth           byte = 1 // C→S: str token
 	Envelope       byte = 2 // C→S: str to, str client_msg_id, bin payload · S→C: str from, …
@@ -22,7 +19,6 @@ const (
 	Error          byte = 7 // S→C: str code
 )
 
-// Limites do contrato (§6).
 const (
 	MaxToken           = 2048
 	MaxMsgID           = 64
@@ -32,13 +28,11 @@ const (
 )
 
 var (
-	// ErrBadFrame: formato inválido (tamanho além do fim, tipo desconhecido, sobra, campo fora do formato).
 	ErrBadFrame = errors.New("bad_frame")
-	// ErrTooLarge: frame bem formado com payload acima do limite do tipo.
-	ErrTooLarge = errors.New("too_large")
+	ErrTooLarge = errors.New("too_large") // bem formado, payload acima do limite do tipo
 )
 
-// Frame decodificado. Os campos FATIAM o buffer de entrada: valem só enquanto ele não for reutilizado.
+// Frame: os campos FATIAM o buffer de entrada e valem só enquanto ele não for reutilizado.
 type Frame struct {
 	Type    byte
 	Peer    []byte // Auth: token; Envelope/Ack/LocationUpdate/LocationOff: o outro usuário (UUID); nil se não houver
@@ -47,7 +41,7 @@ type Frame struct {
 	Payload []byte // Envelope, Location, LocationUpdate
 }
 
-// Decode lê um frame (das duas direções) e confere os limites. Erros: ErrBadFrame ou ErrTooLarge.
+// Decode aceita as duas direções; recusar o tipo errado para a direção é de quem chama.
 func Decode(b []byte) (Frame, error) {
 	r := reader{b: b}
 	f := Frame{Type: r.u8()}
@@ -77,7 +71,7 @@ func Decode(b []byte) (Frame, error) {
 	if !r.ok || r.i != len(b) {
 		return f, ErrBadFrame
 	}
-	if f.Payload != nil && len(f.Payload) == 0 { // o app nunca manda payload vazio; envelope vazio seria linha inútil
+	if f.Payload != nil && len(f.Payload) == 0 { // o app nunca manda; envelope vazio viraria linha inútil no banco
 		return f, ErrBadFrame
 	}
 	if (f.Type == Envelope && len(f.Payload) > MaxEnvelopePayload) ||
@@ -87,7 +81,7 @@ func Decode(b []byte) (Frame, error) {
 	return f, nil
 }
 
-// reader: ok vira false no primeiro erro, e daí em diante tudo devolve nil (sem checar a cada campo no Decode).
+// reader: depois do primeiro erro (ok = false), tudo devolve nil; o Decode confere uma vez só no fim.
 type reader struct {
 	b  []byte
 	i  int
@@ -127,7 +121,7 @@ func (r *reader) bin() []byte {
 		return nil
 	}
 	n := int64(binary.BigEndian.Uint32(h))
-	if n > int64(len(r.b)-r.i) { // antes de converter: u32 não cabe em int de 32 bits
+	if n > int64(len(r.b)-r.i) { // compara antes de converter: u32 não cabe em int de 32 bits
 		r.ok = false
 		return nil
 	}
@@ -142,7 +136,7 @@ func (r *reader) msgID() []byte {
 	return v
 }
 
-// uuid: só a forma canônica minúscula (a que o servidor devolve); assim o mesmo usuário é sempre a mesma chave.
+// uuid: só a forma canônica minúscula, para o mesmo usuário ser sempre a mesma chave de mapa.
 func (r *reader) uuid() []byte {
 	v := r.str()
 	if r.ok && !isUUID(v) {
@@ -170,8 +164,7 @@ func isUUID(v []byte) bool {
 	return true
 }
 
-// Append*: escrevem o frame no fim de dst (reuse um buffer: 0 alocações com capacidade sobrando). Os campos já vêm
-// validados (do Decode ou do próprio servidor); str acima de 65535 bytes é bug de quem chama e dá panic.
+// Os Append* recebem campos já validados: tamanho acima do formato é bug de quem chama e dá panic.
 
 func AppendAuth(dst []byte, token []byte) []byte { return appendStr(append(dst, Auth), token) }
 

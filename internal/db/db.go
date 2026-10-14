@@ -1,4 +1,4 @@
-// Package db abre o pool do Postgres e aplica as migrações SQL embutidas (sem lib de migração).
+// Package db: pool do Postgres e migrações SQL embutidas.
 package db
 
 import (
@@ -17,14 +17,13 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-// lockID serializa instâncias subindo juntas (pg_advisory_xact_lock).
-const lockID = 0x706f6b656c6f63 // "pokeloc"
+// lockID serializa as migrações de instâncias subindo juntas.
+const lockID = 0x706f6b656c6f63
 
 // maxConns: o padrão do pgx (max(4, NumCPU)) não aguenta uma onda de reconexão depois de um deploy (todo cliente faz
 // o Auth do WS, 4 consultas cada, ao mesmo tempo) e os Auths estouram o prazo. pool_max_conns no DSN tem precedência.
 const maxConns = 32
 
-// Open conecta e confere com um ping. pgx usa prepared statements em cache por padrão.
 func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
@@ -44,10 +43,9 @@ func Open(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// Migrate aplica, em ordem, as migrations/NNNN_nome.sql com versão acima da registrada em schema_version.
-// Tudo numa transação só: ou sobe todas as pendentes, ou nenhuma.
+// Migrate aplica as migrations/NNNN_nome.sql acima da versão em schema_version, todas numa transação só.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	files, err := fs.Glob(migrations, "migrations/*.sql") // ordem lexical = ordem numérica (4 dígitos)
+	files, err := fs.Glob(migrations, "migrations/*.sql") // ordem lexical = numérica (4 dígitos)
 	if err != nil {
 		return err
 	}
@@ -78,7 +76,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, string(sql)); err != nil { // sem args = protocolo simples: vários comandos
+			if _, err := tx.Exec(ctx, string(sql)); err != nil { // sem args = protocolo simples, que aceita vários comandos
 				return fmt.Errorf("migração %s: %w", f, err)
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO schema_version (version) VALUES ($1)`, v); err != nil {

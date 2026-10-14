@@ -89,7 +89,7 @@ func TestFieldsDoNotAlias(t *testing.T) {
 	}
 }
 
-// Meta da spec §6: repassar um frame (decode + reencode para o destinatário) não aloca. CI falha se piorar.
+// Repassar um frame (decode + reencode para o destinatário) não aloca; o CI falha se piorar.
 func TestZeroAllocs(t *testing.T) {
 	env := AppendEnvelope(nil, []byte(uid), []byte("4d7e1f4a-msg"), make([]byte, 512))
 	loc := AppendLocation(nil, make([]byte, 120))

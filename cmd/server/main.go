@@ -1,5 +1,5 @@
-// Servidor do PokeLocation: API REST + gateway WebSocket num binário só. Configuração só por variáveis de ambiente
-// (README). Escuta em HTTP puro na rede interna; o TLS fica no Caddy.
+// Servidor do PokeLocation: API REST e WebSocket num binário só, configurado por variáveis de ambiente (README).
+// HTTP puro na rede interna: o TLS fica no Caddy.
 package main
 
 import (
@@ -27,7 +27,7 @@ import (
 
 type config struct {
 	addr, databaseURL, redisURL string
-	cluster                     bool // CLUSTER=1: várias instâncias atrás do mesmo Redis (S8)
+	cluster                     bool
 	auth                        auth.Config
 }
 
@@ -98,7 +98,6 @@ func run() error {
 		hub.EnableCluster(ctx, rdb)
 	}
 
-	// amizade mudou → listas em memória dos dois lados; revogação → derruba os WS na hora
 	reload := func(a, b string) { hub.ReloadFriends(a); hub.ReloadFriends(b) }
 	authH.OnFriendsChange = reload
 	authH.OnRevoke = hub.Kick
@@ -138,7 +137,7 @@ func run() error {
 	return srv.Shutdown(sctx)
 }
 
-// healthz: 200 se o Postgres responde. Redis fora não derruba (o chat segue sem localização, spec §7).
+// healthz ignora o Redis: sem ele o chat continua, só a localização para.
 func healthz(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -151,7 +150,7 @@ func healthz(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// daily roda f na subida e depois a cada 24 h, até ctx acabar. Erro só vai para o log.
+// daily roda f na subida e depois a cada 24 h, até ctx acabar.
 func daily(ctx context.Context, name string, f func(context.Context) error) {
 	t := time.NewTicker(24 * time.Hour)
 	defer t.Stop()

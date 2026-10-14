@@ -13,7 +13,6 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
 )
 
-// Duas instâncias sobre o mesmo Postgres e Redis: envelope, ack, posição, eco, Kick e ReloadFriends atravessam.
 func TestCluster(t *testing.T) {
 	e1 := newEnv(t)
 	e2 := newEnvPool(t, e1.pool)
@@ -26,7 +25,6 @@ func TestCluster(t *testing.T) {
 	ca := e1.online(a)
 	cb := e2.online(b) // o Auth só termina com u:{b} assinado: o envelope logo abaixo não pode se perder
 
-	// envelope a (inst. 1) → b (inst. 2), com o Ack de volta para a
 	ca.send(envelope(b, "m1", "oi"))
 	if f := ca.read(); f.Type != wire.Ack || string(f.Peer) != b {
 		t.Fatalf("a: quero Ack, veio %d", f.Type)
@@ -35,17 +33,16 @@ func TestCluster(t *testing.T) {
 		t.Fatalf("b: quero Envelope de a, veio %d %s", f.Type, f.Payload)
 	}
 
-	// posição de a chega a b na outra instância
 	e1.hub.SendFriends(a, wire.AppendLocationUpdate(Buf(), []byte(a), []byte("p1")))
 	if f := cb.read(); f.Type != wire.LocationUpdate || string(f.Payload) != "p1" {
 		t.Fatalf("b: quero LocationUpdate, veio %d", f.Type)
 	}
 
-	// a também na instância 2: cada conexão recebe uma vez só (sem eco)
+	// a nas duas instâncias: cada conexão recebe uma vez só (sem eco)
 	ca2 := e2.online(a)
 	subscribed(t, rdb, a, 2)
 	cb.send(envelope(a, "m2", "oi2"))
-	_ = cb.read() // Ack
+	_ = cb.read()
 	for _, c := range []*client{ca, ca2} {
 		if f := c.read(); f.Type != wire.Envelope || string(f.Payload) != "oi2" {
 			t.Fatalf("a: quero Envelope oi2, veio %d", f.Type)
@@ -53,7 +50,6 @@ func TestCluster(t *testing.T) {
 		c.quiet(300 * time.Millisecond)
 	}
 
-	// amizade desfeita + ReloadFriends numa instância recarrega a lista na outra
 	if _, err := e1.pool.Exec(context.Background(), `DELETE FROM friendships`); err != nil {
 		t.Fatal(err)
 	}
@@ -71,13 +67,11 @@ func TestCluster(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Kick numa instância derruba a conexão na outra
 	e1.hub.Kick(b)
 	cb.wantClose(websocket.ClosePolicyViolation)
-	subscribed(t, rdb, b, 0) // sem conexão, a instância 2 cancela a assinatura
+	subscribed(t, rdb, b, 0)
 }
 
-// Kick e Reload não dependem da fila de frames: com ela sempre cheia na instância 1, ainda chegam à 2.
 func TestClusterCtlNotDropped(t *testing.T) {
 	e1 := newEnv(t)
 	e2 := newEnvPool(t, e1.pool)
@@ -108,7 +102,6 @@ func TestClusterCtlNotDropped(t *testing.T) {
 	cb.wantClose(websocket.ClosePolicyViolation)
 }
 
-// subscribed espera n instâncias assinando u:{user}.
 func subscribed(t *testing.T, rdb *redis.Client, user string, n int64) {
 	t.Helper()
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
