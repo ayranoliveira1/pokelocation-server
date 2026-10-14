@@ -43,19 +43,23 @@ const (
 	qTransfer = `UPDATE groups SET owner_id = (SELECT user_id FROM group_members WHERE group_id = $1
 		ORDER BY joined_at, user_id LIMIT 1) WHERE id = $1`
 	qList = `SELECT g.id, g.owner_id, g.created_at,
-			array_agg(m.user_id::text ORDER BY m.joined_at, m.user_id <> g.owner_id, m.user_id)
+			array_agg(m.user_id::text ORDER BY m.joined_at, m.user_id <> g.owner_id, m.user_id),
+			array_agg(u.username ORDER BY m.joined_at, m.user_id <> g.owner_id, m.user_id)
 		FROM group_members me
 		JOIN groups g ON g.id = me.group_id
 		JOIN group_members m ON m.group_id = g.id
+		JOIN users u ON u.id = m.user_id
 		WHERE me.user_id = $1
 		GROUP BY g.id
 		ORDER BY g.created_at, g.id
 		LIMIT $2`
 	qGet = `SELECT g.id, g.owner_id, g.created_at,
-			array_agg(m.user_id::text ORDER BY m.joined_at, m.user_id <> g.owner_id, m.user_id)
+			array_agg(m.user_id::text ORDER BY m.joined_at, m.user_id <> g.owner_id, m.user_id),
+			array_agg(u.username ORDER BY m.joined_at, m.user_id <> g.owner_id, m.user_id)
 		FROM group_members me
 		JOIN groups g ON g.id = me.group_id
 		JOIN group_members m ON m.group_id = g.id
+		JOIN users u ON u.id = m.user_id
 		WHERE me.user_id = $1 AND me.group_id = $2
 		GROUP BY g.id`
 )
@@ -254,8 +258,14 @@ func LeaveAllTx(ctx context.Context, tx pgx.Tx, user string) ([]Change, error) {
 func scanGroup(row pgx.CollectableRow) (Group, error) {
 	var g Group
 	var at time.Time
-	err := row.Scan(&g.ID, &g.OwnerID, &at, &g.Members)
+	var ids []string
+	var names []*string
+	err := row.Scan(&g.ID, &g.OwnerID, &at, &ids, &names)
 	g.CreatedAt = at.UnixMilli()
+	g.Members = make([]Member, len(ids))
+	for i := range ids {
+		g.Members[i] = Member{ids[i], names[i]}
+	}
 	return g, err
 }
 

@@ -1,6 +1,7 @@
 package groups
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -52,7 +53,16 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if gs == nil {
 		gs = []Group{}
 	}
-	httpx.JSON(w, http.StatusOK, map[string][]Group{"groups": gs})
+	body, err := json.Marshal(map[string][]Group{"groups": gs})
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	if len(body) > maxJSON { // nunca corta em silêncio
+		httpx.Error(w, http.StatusRequestEntityTooLarge, "too_large")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, json.RawMessage(body))
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {

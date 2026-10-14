@@ -10,11 +10,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// Tetos do contrato: com eles o GET /v1/groups cabe nos 64 KiB do app.
 const (
 	maxMembers = 50 // contando o dono
 	maxGroups  = 25
 	listLimit  = 2 * maxGroups // LIMIT defensivo acima do teto
+	maxJSON    = 192 << 10     // GET /v1/groups: o app lê até 192 KiB; os tetos dão ~108 KiB no pior caso
 )
 
 var (
@@ -28,8 +28,13 @@ var (
 type Group struct {
 	ID        string   `json:"id"`
 	OwnerID   string   `json:"owner_id"`
-	Members   []string `json:"members"`
+	Members   []Member `json:"members"`
 	CreatedAt int64    `json:"created_at"` // epoch ms
+}
+
+type Member struct {
+	UserID   string  `json:"user_id"`
+	Username *string `json:"username"` // null em conta antiga, ainda sem @nome
 }
 
 type Service struct {

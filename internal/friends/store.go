@@ -21,8 +21,9 @@ const pairIs = `least(requester_id, addressee_id) = least($1::uuid, $2::uuid) AN
 
 // Queries com o plano conferido em indexes_integration_test.go.
 const (
-	qUserByCode   = `SELECT id FROM users WHERE friend_code = $1`
-	qBlockBetween = `SELECT blocker_id = $1 FROM blocks
+	qUserByCode     = `SELECT id FROM users WHERE friend_code = $1`
+	qUserByUsername = `SELECT id FROM users WHERE username = $1`
+	qBlockBetween   = `SELECT blocker_id = $1 FROM blocks
 			WHERE (blocker_id = $1 AND blocked_id = $2) OR (blocker_id = $2 AND blocked_id = $1)
 			ORDER BY blocker_id = $1 DESC LIMIT 1`
 	qPairForUpdate = `SELECT id, status, requester_id = $1 FROM friendships WHERE ` + pairIs + ` FOR UPDATE`
@@ -51,7 +52,7 @@ const (
 	qDeleteEnvelopesPair = `DELETE FROM envelopes WHERE (recipient_id = $1 AND sender_id = $2)
 			OR (recipient_id = $2 AND sender_id = $1)`
 	qUnblock = `DELETE FROM blocks WHERE blocker_id = $1 AND blocked_id = $2`
-	qList    = `SELECT f.id, f.status, f.requester_id = $1, u.id, u.friend_code, f.created_at
+	qList    = `SELECT f.id, f.status, f.requester_id = $1, u.id, u.friend_code, f.created_at, u.username
 		FROM friendships f
 		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
 		WHERE f.requester_id = $1 OR f.addressee_id = $1
@@ -62,6 +63,15 @@ const (
 func (s *Store) userByCode(ctx context.Context, code string) (string, error) {
 	var id string
 	err := s.pool.QueryRow(ctx, qUserByCode, code).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrCodeNotFound
+	}
+	return id, err
+}
+
+func (s *Store) userByUsername(ctx context.Context, name string) (string, error) {
+	var id string
+	err := s.pool.QueryRow(ctx, qUserByUsername, name).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrCodeNotFound
 	}
@@ -219,15 +229,16 @@ func (s *Store) list(ctx context.Context, me string) (List, error) {
 		id, status, other, code string
 		outgoing                bool
 		at                      time.Time
+		name                    *string
 	)
-	_, err = pgx.ForEachRow(rows, []any{&id, &status, &outgoing, &other, &code, &at}, func() error {
+	_, err = pgx.ForEachRow(rows, []any{&id, &status, &outgoing, &other, &code, &at, &name}, func() error {
 		switch {
 		case status == "accepted":
-			l.Friends = append(l.Friends, Friend{other, code})
+			l.Friends = append(l.Friends, Friend{other, code, name})
 		case outgoing:
-			l.Outgoing = append(l.Outgoing, Request{id, other, code, at.UnixMilli()})
+			l.Outgoing = append(l.Outgoing, Request{id, other, code, at.UnixMilli(), name})
 		default:
-			l.Incoming = append(l.Incoming, Request{id, other, code, at.UnixMilli()})
+			l.Incoming = append(l.Incoming, Request{id, other, code, at.UnixMilli(), name})
 		}
 		return nil
 	})

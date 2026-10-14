@@ -380,8 +380,10 @@ func TestGetLocations(t *testing.T) {
 		rdb.Set(ctx, "loc:"+u, "pos-"+u, time.Minute)
 	}
 
+	e.exec(`UPDATE users SET username = 'bob_1' WHERE id = $1`, b)
 	status, got, raw := e.get(a)
-	if status != 200 || len(got) != 1 || got[0].UserID != b || got[0].FriendCode != bCode || string(got[0].Payload) != "pos-"+b {
+	if status != 200 || len(got) != 1 || got[0].UserID != b || got[0].FriendCode != bCode || string(got[0].Payload) != "pos-"+b ||
+		got[0].Username == nil || *got[0].Username != "bob_1" {
 		t.Fatalf("GET /v1/locations: %d %s", status, raw)
 	}
 	if _, got, _ := e.get(stranger); len(got) != 0 {

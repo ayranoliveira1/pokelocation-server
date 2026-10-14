@@ -211,7 +211,7 @@ func (s *Service) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 
 // Plano conferido em indexes_integration_test.go.
 const (
-	qFriends = `SELECT u.id, u.friend_code FROM friendships f
+	qFriends = `SELECT u.id, u.friend_code, u.username FROM friendships f
 		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
 		WHERE f.status = 'accepted' AND (f.requester_id = $1 OR f.addressee_id = $1)
 		AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.blocker_id = $1 AND b.blocked_id = u.id)
@@ -220,13 +220,14 @@ const (
 )
 
 type entry struct {
-	UserID     string `json:"user_id"`
-	FriendCode string `json:"friend_code"`
-	Payload    []byte `json:"payload"`
+	UserID     string  `json:"user_id"`
+	FriendCode string  `json:"friend_code"`
+	Username   *string `json:"username"` // null em conta antiga, ainda sem @nome
+	Payload    []byte  `json:"payload"`
 }
 
 // bytes fixos de cada entrada do JSON, sem os valores
-var entryOverhead = len(`{"user_id":"","friend_code":"","payload":""},`)
+var entryOverhead = len(`{"user_id":"","friend_code":"","username":null,"payload":""},`)
 
 // Redis fora → lista vazia, não erro (contrato).
 func (s *Service) locations(w http.ResponseWriter, r *http.Request) {
@@ -237,9 +238,11 @@ func (s *Service) locations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var ids, codes, keys []string
+	var names []*string
 	var id, code string
-	if _, err := pgx.ForEachRow(rows, []any{&id, &code}, func() error {
-		ids, codes, keys = append(ids, id), append(codes, code), append(keys, "loc:"+id)
+	var name *string
+	if _, err := pgx.ForEachRow(rows, []any{&id, &code, &name}, func() error {
+		ids, codes, keys, names = append(ids, id), append(codes, code), append(keys, "loc:"+id), append(names, name)
 		return nil
 	}); err != nil {
 		httpx.DBError(w, "location", err)
@@ -263,12 +266,15 @@ func (s *Service) locations(w http.ResponseWriter, r *http.Request) {
 				continue // sem posição
 			}
 			n := entryOverhead + len(ids[i]) + len(codes[i]) + base64.StdEncoding.EncodedLen(len(p))
+			if names[i] != nil {
+				n += len(*names[i]) + 2 - len("null") // "nome" no lugar de null; @nome é só [a-z0-9_.]
+			}
 			if size+n > maxJSON { // nunca corta em silêncio
 				httpx.Error(w, http.StatusRequestEntityTooLarge, "too_large")
 				return
 			}
 			size += n
-			out.Locations = append(out.Locations, entry{ids[i], codes[i], []byte(p)})
+			out.Locations = append(out.Locations, entry{ids[i], codes[i], names[i], []byte(p)})
 		}
 	}
 	httpx.JSON(w, http.StatusOK, out)

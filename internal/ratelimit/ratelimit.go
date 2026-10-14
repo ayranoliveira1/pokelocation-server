@@ -1,4 +1,4 @@
-// Package ratelimit: N por minuto por chave, em memória (golang.org/x/time/rate).
+// Package ratelimit: N por janela por chave, em memória (golang.org/x/time/rate).
 // ponytail: vale por instância; passa para o Redis quando houver mais de uma instância.
 package ratelimit
 
@@ -11,7 +11,8 @@ import (
 
 type Limiter struct {
 	mu     sync.Mutex
-	perMin int
+	n      int
+	window time.Duration
 	m      map[string]*bucket
 	swept  time.Time
 }
@@ -22,14 +23,19 @@ type bucket struct {
 }
 
 // New: balde de perMin, recarga de 1 a cada 60/perMin s.
-func New(perMin int) *Limiter { return &Limiter{perMin: perMin, m: map[string]*bucket{}} }
+func New(perMin int) *Limiter { return NewWindow(perMin, time.Minute) }
+
+// NewWindow: balde de n, recarga de 1 a cada window/n.
+func NewWindow(n int, window time.Duration) *Limiter {
+	return &Limiter{n: n, window: window, m: map[string]*bucket{}}
+}
 
 func (l *Limiter) Allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if now.Sub(l.swept) > time.Minute { // parado há 1 min = balde cheio = igual a um novo: pode sair do mapa
+	if now.Sub(l.swept) > l.window { // parado uma janela inteira = balde cheio = igual a um novo: pode sair do mapa
 		for k, b := range l.m {
-			if now.Sub(b.seen) > time.Minute {
+			if now.Sub(b.seen) > l.window {
 				delete(l.m, k)
 			}
 		}
@@ -37,7 +43,7 @@ func (l *Limiter) Allow(key string, now time.Time) bool {
 	}
 	b := l.m[key]
 	if b == nil {
-		b = &bucket{l: rate.NewLimiter(rate.Every(time.Minute/time.Duration(l.perMin)), l.perMin)}
+		b = &bucket{l: rate.NewLimiter(rate.Every(l.window/time.Duration(l.n)), l.n)}
 		l.m[key] = b
 	}
 	b.seen = now

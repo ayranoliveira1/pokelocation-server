@@ -9,6 +9,8 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+
+	"github.com/ayranoliveira1/pokelocation-server/internal/username"
 )
 
 // Tetos por usuário (docs/api.md §3): mantêm GET /v1/friends abaixo de 64 KiB.
@@ -29,15 +31,17 @@ var (
 )
 
 type Friend struct {
-	UserID     string `json:"user_id"`
-	FriendCode string `json:"friend_code"`
+	UserID     string  `json:"user_id"`
+	FriendCode string  `json:"friend_code"`
+	Username   *string `json:"username"` // null em conta antiga, ainda sem @nome
 }
 
 type Request struct {
-	ID         string `json:"id"`
-	UserID     string `json:"user_id"`
-	FriendCode string `json:"friend_code"`
-	CreatedAt  int64  `json:"created_at"` // epoch ms
+	ID         string  `json:"id"`
+	UserID     string  `json:"user_id"`
+	FriendCode string  `json:"friend_code"`
+	CreatedAt  int64   `json:"created_at"` // epoch ms
+	Username   *string `json:"username"`
 }
 
 type List struct {
@@ -65,6 +69,23 @@ func (s *Service) Request(ctx context.Context, me, rawCode string) (id, status s
 	if err != nil {
 		return "", "", false, err
 	}
+	return s.requestTo(ctx, me, to)
+}
+
+// RequestByUsername: nome inválido conta como inexistente (code_not_found), como o código.
+func (s *Service) RequestByUsername(ctx context.Context, me, raw string) (id, status string, created bool, err error) {
+	name, err := username.Check(raw)
+	if err != nil {
+		return "", "", false, ErrCodeNotFound
+	}
+	to, err := s.store.userByUsername(ctx, name)
+	if err != nil {
+		return "", "", false, err
+	}
+	return s.requestTo(ctx, me, to)
+}
+
+func (s *Service) requestTo(ctx context.Context, me, to string) (id, status string, created bool, err error) {
 	if to == me {
 		return "", "", false, ErrSelf
 	}

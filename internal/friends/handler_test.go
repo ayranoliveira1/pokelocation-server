@@ -90,6 +90,7 @@ func (e *env) request(from, to user) map[string]any {
 
 type listed struct {
 	friends            map[string]string // user_id → friend_code
+	names              map[string]any    // user_id → username dos amigos (nil se a conta não tem)
 	incoming, outgoing map[string]map[string]any
 }
 
@@ -114,9 +115,10 @@ func (e *env) list(u user) listed {
 			e.t.Fatalf("GET /v1/friends sem %s: %s", k, w.Body)
 		}
 	}
-	l := listed{map[string]string{}, map[string]map[string]any{}, map[string]map[string]any{}}
+	l := listed{map[string]string{}, map[string]any{}, map[string]map[string]any{}, map[string]map[string]any{}}
 	for _, f := range raw.Friends {
 		l.friends[f["user_id"].(string)] = f["friend_code"].(string)
+		l.names[f["user_id"].(string)] = f["username"]
 	}
 	for _, r := range raw.Incoming {
 		l.incoming[r["user_id"].(string)] = r
@@ -177,7 +179,8 @@ func TestRequestErrors(t *testing.T) {
 		{`{"code":"ZZZZZZZZ"}`, 404, "code_not_found"},
 		{`{"code":"curto"}`, 404, "code_not_found"},
 		{`{"code":""}`, 404, "code_not_found"},
-		{`{}`, 404, "code_not_found"},
+		{`{}`, 400, "bad_request"}, // nem code nem username
+		{`{"code":"ZZZZZZZZ","username":"bob_1"}`, 400, "bad_request"},
 		{`{"code":1}`, 400, "bad_request"},
 		{`não é json`, 400, "bad_request"},
 		{`{"code":"ZZZZZZZZ"} {}`, 400, "bad_request"},
@@ -479,4 +482,41 @@ func TestListLimit(t *testing.T) {
 	if l := e.list(a); len(l.friends) != listLimit {
 		t.Fatalf("lista com %d amigos, want o LIMIT %d", len(l.friends), listLimit)
 	}
+}
+
+func (e *env) name(u user, n string) { e.exec(`UPDATE users SET username = $2 WHERE id = $1`, u.id, n) }
+
+// Pedido por @nome (§8): normalizado como no cadastro; inválido, inexistente ou de quem te bloqueou → code_not_found.
+func TestRequestByUsername(t *testing.T) {
+	e := newEnv(t)
+	a, b, c, blocker := e.user(), e.user(), e.user(), e.user()
+	e.name(a, "alice")
+	e.name(b, "bob_1")
+	e.name(blocker, "blocker")
+	e.exec(`INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2)`, blocker.id, a.id)
+
+	out := e.want(a, "POST", "/v1/friends/requests", `{"username":"  Bob_1 "}`, 201, "")
+	if out["status"] != "pending" {
+		t.Fatalf("pedido por @nome: %v", out)
+	}
+	if r := e.list(a).outgoing[b.id]; r == nil || r["username"] != "bob_1" {
+		t.Fatalf("outgoing sem username: %v", e.list(a).outgoing)
+	}
+	if r := e.list(b).incoming[a.id]; r == nil || r["username"] != "alice" {
+		t.Fatalf("incoming sem username: %v", e.list(b).incoming)
+	}
+	e.want(b, "POST", "/v1/friends/requests", `{"username":"alice"}`, 200, "") // cruzado
+	if n := e.list(a).names[b.id]; n != "bob_1" {
+		t.Fatalf("friends sem username: %v", e.list(a).names)
+	}
+
+	for _, n := range []string{"x", "nao_existe", "admin", "ção"} {
+		e.want(c, "POST", "/v1/friends/requests", `{"username":"`+n+`"}`, 404, "code_not_found")
+	}
+	e.want(a, "POST", "/v1/friends/requests", `{"username":"blocker"}`, 404, "code_not_found") // nunca revela
+	e.want(a, "POST", "/v1/friends/requests", `{"username":"alice"}`, 400, "self_request")
+	for range 6 { // 4 + 6 erros de c
+		e.want(c, "POST", "/v1/friends/requests", `{"username":"x"}`, 404, "code_not_found")
+	}
+	e.want(c, "POST", "/v1/friends/requests", `{"username":"bob_1"}`, 429, "rate_limited") // o mesmo limite de 10
 }

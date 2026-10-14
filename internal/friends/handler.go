@@ -48,12 +48,26 @@ func (h *Handler) request(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Code string `json:"code"`
+		Code     *string `json:"code"`
+		Username *string `json:"username"`
 	}
 	if !httpx.Decode(w, r, 4<<10, &in) {
 		return
 	}
-	id, status, created, err := h.Service.Request(r.Context(), httpx.User(r.Context()), in.Code)
+	if (in.Code == nil) == (in.Username == nil) { // um ou outro (§8)
+		httpx.Error(w, http.StatusBadRequest, "bad_request")
+		return
+	}
+	var (
+		id, status string
+		created    bool
+		err        error
+	)
+	if in.Code != nil {
+		id, status, created, err = h.Service.Request(r.Context(), httpx.User(r.Context()), *in.Code)
+	} else {
+		id, status, created, err = h.Service.RequestByUsername(r.Context(), httpx.User(r.Context()), *in.Username)
+	}
 	if err != nil {
 		fail(w, err)
 		return

@@ -29,10 +29,10 @@ func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 	testdb.RequireIndex(t, pool, qUserGroups, []any{s.User}, "group_members_user")
 	testdb.RequireIndex(t, pool, qTransfer, []any{anyGroup}, "groups_pkey")
 	testdb.RequireIndex(t, pool, qTransfer, []any{anyGroup}, "group_members_pkey")
-	for _, idx := range []string{"group_members_user", "groups_pkey", "group_members_pkey"} {
+	for _, idx := range []string{"group_members_user", "groups_pkey", "group_members_pkey", "users_pkey"} {
 		testdb.RequireIndex(t, pool, qList, []any{s.User, listLimit}, idx)
 	}
-	for _, idx := range []string{"groups_pkey", "group_members_pkey"} {
+	for _, idx := range []string{"groups_pkey", "group_members_pkey", "users_pkey"} {
 		testdb.RequireIndex(t, pool, qGet, member, idx)
 	}
 }

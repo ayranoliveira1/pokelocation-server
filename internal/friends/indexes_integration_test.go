@@ -18,6 +18,7 @@ func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 	pair := []any{s.User, s.Friend}
 	byID := []any{anyID, s.User}
 	testdb.RequireIndex(t, pool, qUserByCode, []any{s.FriendCode}, "users_friend_code_key")
+	testdb.RequireIndex(t, pool, qUserByUsername, []any{"bob_1"}, "users_username_key")
 	testdb.RequireIndex(t, pool, qUserExists, []any{s.Friend}, "users_pkey")
 	testdb.RequireIndex(t, pool, qBlock, pair, "users_pkey")
 	testdb.RequireIndex(t, pool, qBlockBetween, pair, "blocks_pkey", "blocks_blocked")

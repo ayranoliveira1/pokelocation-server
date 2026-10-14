@@ -153,8 +153,21 @@ func (e *env) add(by, group, user string, status int, code string) {
 type group struct {
 	ID        string   `json:"id"`
 	OwnerID   string   `json:"owner_id"`
-	Members   []string `json:"members"`
+	Members   []member `json:"members"`
 	CreatedAt int64    `json:"created_at"`
+}
+
+type member struct {
+	UserID   string  `json:"user_id"`
+	Username *string `json:"username"`
+}
+
+func (g group) ids() []string {
+	out := make([]string, len(g.Members))
+	for i, m := range g.Members {
+		out[i] = m.UserID
+	}
+	return out
 }
 
 func (e *env) get(user, id string) group {
@@ -200,13 +213,19 @@ func TestCreateAndGet(t *testing.T) {
 	a, b, c, d := e.user(), e.user(), e.user(), e.user()
 	e.friends(a, b, c)
 
+	e.exec(`UPDATE users SET username = 'bob_1' WHERE id = $1`, b)
 	id := e.create(a, b, c, b, a) // repetidos e o próprio dono não duplicam
 	e.wantChange(id, a, b, c)
 	g := e.get(b, id)
-	if g.ID != id || g.OwnerID != a || !slices.Equal(sorted(g.Members...), sorted(a, b, c)) || g.CreatedAt < 1e12 {
+	if g.ID != id || g.OwnerID != a || !slices.Equal(sorted(g.ids()...), sorted(a, b, c)) || g.CreatedAt < 1e12 {
 		t.Fatalf("GET: %+v", g)
 	}
-	if g.Members[0] != a {
+	for _, m := range g.Members {
+		if (m.UserID == b) != (m.Username != nil && *m.Username == "bob_1") {
+			t.Fatalf("username do membro %s: %v", m.UserID, m.Username)
+		}
+	}
+	if g.Members[0].UserID != a {
 		t.Fatalf("membros fora da ordem de entrada (dono primeiro): %v", g.Members)
 	}
 
@@ -226,7 +245,7 @@ func TestCreateAndGet(t *testing.T) {
 	}
 
 	solo := e.create(d) // lista vazia: grupo só com o dono
-	if g := e.get(d, solo); !slices.Equal(g.Members, []string{d}) {
+	if g := e.get(d, solo); !slices.Equal(g.ids(), []string{d}) {
 		t.Fatalf("grupo só com o dono: %+v", g)
 	}
 }
@@ -333,7 +352,7 @@ func TestRemoveAndLeave(t *testing.T) {
 
 	e.want(a, "DELETE", "/v1/groups/"+id+"/members/"+a, "", 204, "") // o dono sai: herda o mais antigo (b)
 	e.wantChange(id, b, d, a)
-	if g := e.get(b, id); g.OwnerID != b || !slices.Equal(sorted(g.Members...), sorted(b, d)) {
+	if g := e.get(b, id); g.OwnerID != b || !slices.Equal(sorted(g.ids()...), sorted(b, d)) {
 		t.Fatalf("depois de o dono sair: %+v", g)
 	}
 
@@ -468,10 +487,10 @@ func TestLeaveAllTx(t *testing.T) {
 		!slices.Equal(got[alone], want[alone]) {
 		t.Fatalf("changes: %v, want %v", got, want)
 	}
-	if g := e.get(x, owned); g.OwnerID != x || !slices.Equal(g.Members, []string{x}) {
+	if g := e.get(x, owned); g.OwnerID != x || !slices.Equal(g.ids(), []string{x}) {
 		t.Fatalf("grupo de que u era dono: %+v", g)
 	}
-	if g := e.get(y, member); !slices.Equal(g.Members, []string{y}) {
+	if g := e.get(y, member); !slices.Equal(g.ids(), []string{y}) {
 		t.Fatalf("grupo de que u era membro: %+v", g)
 	}
 	var n int
@@ -497,4 +516,33 @@ func (e *env) leaveAll(u string) ([]Change, error) {
 		return err
 	})
 	return out, err
+}
+
+// Teto do JSON do GET /v1/groups (o app lê até 192 KiB): pior caso dos tetos cabe; acima disso, 413 sem cortar.
+func TestListSize(t *testing.T) {
+	e := newEnv(t)
+	u := e.user()
+	ctx := context.Background()
+	others := e.friendsBulk(u, maxMembers-1)
+	e.exec(`UPDATE users SET username = 'u' || lpad(n::text, 19, '0')
+		FROM (SELECT id, row_number() OVER () n FROM users WHERE id = ANY($1::uuid[])) x WHERE users.id = x.id`, others)
+	e.exec(`UPDATE users SET username = 'dono' || lpad('', 16, '0') WHERE id = $1`, u)
+	seed := func(n int) {
+		e.exec(`WITH g AS (INSERT INTO groups (owner_id) SELECT $1 FROM generate_series(1, $2) RETURNING id)
+			INSERT INTO group_members (group_id, user_id)
+			SELECT g.id, m FROM g, unnest($3::uuid[]) m`, u, n, append([]string{u}, others...))
+	}
+	seed(maxGroups)
+	req := httptest.NewRequest("GET", "/v1/groups", nil).WithContext(httpx.WithUser(ctx, u))
+	w := httptest.NewRecorder()
+	e.mux.ServeHTTP(w, req)
+	if w.Code != 200 || w.Body.Len() > maxJSON {
+		t.Fatalf("pior caso dos tetos: %d, %d bytes (limite %d)", w.Code, w.Body.Len(), maxJSON)
+	}
+	seed(maxGroups) // 50 grupos: só o banco deixa
+	w = httptest.NewRecorder()
+	e.mux.ServeHTTP(w, req)
+	if w.Code != 413 || !strings.Contains(w.Body.String(), `"too_large"`) {
+		t.Fatalf("acima do teto: %d %.100s", w.Code, w.Body)
+	}
 }
