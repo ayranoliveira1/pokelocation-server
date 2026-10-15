@@ -43,10 +43,11 @@ type Handler struct {
 	OnRevoke        func(user string)
 	OnFriendsChange func(a, b string)
 	OnGroupsChange  func(groupID string, users []string)
+	OnDelete        func(user string, exFriends []string)
 
-	svc       *Service
-	ip, email *ratelimit.Limiter
-	reqWait   time.Duration // campo para o teste encurtar
+	svc            *Service
+	ip, email, del *ratelimit.Limiter
+	reqWait        time.Duration // campo para o teste encurtar
 }
 
 func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
@@ -64,8 +65,13 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		names: ratelimit.NewWindow(5, 24*time.Hour),
 	}
 	s.google = s.googleIdentity
-	h := &Handler{svc: s, ip: ratelimit.New(5), email: ratelimit.New(5), reqWait: reqWait}
+	h := &Handler{svc: s, ip: ratelimit.New(5), email: ratelimit.New(5), del: ratelimit.New(5), reqWait: reqWait}
 	s.notify = h.notify
+	s.deleted = func(user string, ex []string) {
+		if h.OnDelete != nil {
+			h.OnDelete(user, ex)
+		}
+	}
 	if s.dummy, err = s.hashPassword(context.Background(), rand.Text()); err != nil {
 		return nil, err
 	}
@@ -98,6 +104,7 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	mux.HandleFunc("GET /v1/auth/google/callback", httpx.Timed(googleWait, h.googleCallback))
 	mux.HandleFunc("POST /v1/auth/google/exchange", httpx.Timed(d, h.googleExchange))
 	mux.Handle("GET /v1/me", authed(httpx.Timed(d, h.me)))
+	mux.Handle("DELETE /v1/me", authed(httpx.Timed(d, h.deleteMe)))
 	mux.Handle("PUT /v1/me/username", authed(httpx.Timed(d, h.putUsername)))
 }
 
@@ -116,13 +123,8 @@ func (h *Handler) AuthedNamed(next http.HandlerFunc) http.Handler { return h.aut
 
 func (h *Handler) authed(needName bool, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
-		if !strings.EqualFold(scheme, "Bearer") {
-			httpx.Error(w, http.StatusUnauthorized, "unauthorized")
-			return
-		}
 		ctx, cancel := context.WithTimeout(r.Context(), h.reqWait)
-		uid, named, err := h.svc.verify(ctx, token)
+		uid, named, err := h.svc.verify(ctx, bearer(r))
 		cancel()
 		if err == nil && needName && !named {
 			err = errUsernameRequired
@@ -133,6 +135,14 @@ func (h *Handler) authed(needName bool, next http.HandlerFunc) http.Handler {
 		}
 		next(w, r.WithContext(httpx.WithUser(r.Context(), uid)))
 	})
+}
+
+func bearer(r *http.Request) string {
+	scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !strings.EqualFold(scheme, "Bearer") {
+		return ""
+	}
+	return token
 }
 
 type credentials struct {
@@ -186,20 +196,41 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	id := httpx.User(r.Context())
-	email, code, name, err := h.svc.store.me(r.Context(), id)
+	email, code, name, hasPassword, err := h.svc.store.me(r.Context(), id)
 	if errors.Is(err, errNotFound) {
-		err = errUnauthorized // conta apagada com access ainda dentro do prazo
+		err = errAccountDeleted // apagada entre o middleware e esta leitura
 	}
 	if err != nil {
 		h.fail(w, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, struct {
-		ID         string  `json:"id"`
-		Email      *string `json:"email"`
-		FriendCode string  `json:"friend_code"`
-		Username   *string `json:"username"`
-	}{id, email, code, name})
+		ID          string  `json:"id"`
+		Email       *string `json:"email"`
+		FriendCode  string  `json:"friend_code"`
+		Username    *string `json:"username"`
+		HasPassword bool    `json:"has_password"`
+	}{id, email, code, name, hasPassword})
+}
+
+func (h *Handler) deleteMe(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Password    string `json:"password"`
+		ReauthToken string `json:"reauth_token"`
+	}
+	id := httpx.User(r.Context())
+	if !httpx.Decode(w, r, maxBody, &in) {
+		return
+	}
+	if now := h.svc.now(); !h.ip.Allow(clientIP(r), now) || !h.del.Allow(id, now) {
+		httpx.Error(w, http.StatusTooManyRequests, "rate_limited")
+		return
+	}
+	if err := h.svc.deleteAccount(r.Context(), id, in.Password, in.ReauthToken); err != nil {
+		h.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) putUsername(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +254,17 @@ func (h *Handler) googleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	to, err := h.svc.googleStart(r.Context(), one(q, "code_challenge"), one(q, "code_challenge_method"), one(q, "state"))
+	mode := modeLogin
+	switch one(q, "reauth") {
+	case "1":
+		mode = modeReauth
+	case "":
+	default:
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	to, err := h.svc.googleStart(r.Context(), mode, one(q, "code_challenge"), one(q, "code_challenge_method"),
+		one(q, "state"))
 	if errors.Is(err, errBadRequest) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -238,7 +279,7 @@ func (h *Handler) googleStart(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) googleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	challenge, appState, err := h.svc.takeState(r.Context(), one(q, "state"))
+	mode, challenge, appState, err := h.svc.takeState(r.Context(), one(q, "state"))
 	if errors.Is(err, errBadState) {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
@@ -255,7 +296,7 @@ func (h *Handler) googleCallback(w http.ResponseWriter, r *http.Request) {
 	case q.Get("error") != "" || code == "":
 		back.Set("error", "google_failed")
 	default:
-		c, err := h.svc.googleLogin(r.Context(), challenge, code)
+		c, err := h.svc.googleLogin(r.Context(), mode, challenge, code)
 		if err != nil {
 			logErr("google_login", err)
 			back.Set("error", "google_failed")
@@ -270,12 +311,28 @@ func (h *Handler) googleExchange(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Code     string `json:"code"`
 		Verifier string `json:"code_verifier"`
+		Reauth   bool   `json:"reauth"`
 	}
 	if !httpx.Decode(w, r, maxBody, &in) || !h.allow(w, r, "") {
 		return
 	}
-	t, err := h.svc.googleExchange(r.Context(), in.Code, in.Verifier)
-	h.reply(w, http.StatusOK, t, err)
+	if !in.Reauth {
+		t, err := h.svc.googleExchange(r.Context(), in.Code, in.Verifier)
+		h.reply(w, http.StatusOK, t, err)
+		return
+	}
+	user, _, err := h.svc.verify(r.Context(), bearer(r))
+	if err == nil {
+		var t string
+		if t, err = h.svc.googleReauth(r.Context(), user, in.Code, in.Verifier); err == nil {
+			httpx.JSON(w, http.StatusOK, struct {
+				Token     string `json:"reauth_token"`
+				ExpiresIn int    `json:"expires_in"`
+			}{t, int(reauthTTL / time.Second)})
+			return
+		}
+	}
+	h.fail(w, err)
 }
 
 // one: parâmetro repetido conta como ausente (sem ambiguidade sobre qual valor vale).

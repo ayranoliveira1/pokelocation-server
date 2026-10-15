@@ -185,6 +185,32 @@ func TestOff(t *testing.T) {
 	}
 }
 
+func TestForget(t *testing.T) {
+	t.Parallel()
+	rdb := testdb.Redis(t)
+	s, h, _ := newTest(t, rdb, nil)
+	ctx := context.Background()
+
+	s.handle(userA, loc("1"))
+	h.take()
+	s.Forget(userA) // a posição ainda não foi gravada: o flush não pode gravá-la
+	s.flush(ctx)
+	if v, _ := stored(t, rdb, userA); v != "" {
+		t.Fatalf("Redis depois do Forget: %q", v)
+	}
+
+	b := "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	rdb.Set(ctx, "loc:"+b, "velha", time.Minute)
+	s.Forget(b)
+	s.flush(ctx)
+	if v, _ := stored(t, rdb, b); v != "" {
+		t.Fatalf("Forget sem estado não apagou: %q", v)
+	}
+	if g := h.take(); len(g) != 0 {
+		t.Fatalf("Forget mandou frame: %+v", g)
+	}
+}
+
 // Dentro de um mesmo intervalo de flush, vale a última intenção do usuário (SET ou DEL).
 func TestLastIntentWins(t *testing.T) {
 	t.Parallel()

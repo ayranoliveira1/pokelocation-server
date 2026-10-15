@@ -102,7 +102,7 @@ func TestAuthed(t *testing.T) {
 		{"sem tv", "Bearer " + noTV, 401},
 		{"tv velho", "Bearer " + oldTV, 401},
 		{"montado à mão com tv certo", "Bearer " + sign(uid, future, &zero), 204},
-		{"usuário apagado", "Bearer " + ghost, 401},
+		{"usuário apagado", "Bearer " + ghost, 410},
 		{"sub não é uuid", "Bearer " + notUUID, 401},
 		{"adulterado", "Bearer " + tampered, 401},
 		{"lixo", "Bearer x.y.z", 401},
@@ -118,8 +118,9 @@ func TestAuthed(t *testing.T) {
 			if rec.Code != c.status {
 				t.Fatalf("status %d, quero %d", rec.Code, c.status)
 			}
-			if c.status == 401 {
-				if body := rec.Body.String(); body != "{\"error\":\"unauthorized\"}\n" {
+			if c.status >= 400 {
+				code := map[int]string{401: "unauthorized", 410: "account_deleted"}[c.status]
+				if body := rec.Body.String(); body != "{\"error\":\""+code+"\"}\n" {
 					t.Errorf("corpo %q", body)
 				}
 				if seen != "" {

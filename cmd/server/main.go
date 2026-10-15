@@ -113,6 +113,10 @@ func run() error {
 	reload := func(a, b string) { hub.ReloadFriends(a); hub.ReloadFriends(b) }
 	authH.OnFriendsChange = reload
 	authH.OnRevoke = hub.Kick
+	authH.OnDelete = func(user string, exFriends []string) {
+		loc.Forget(user)
+		hub.LocationOff(user, exFriends)
+	}
 	fh := friends.New(pool)
 	fh.OnChange = reload
 	gh := groups.New(pool)

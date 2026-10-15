@@ -248,6 +248,15 @@ func TestAuth(t *testing.T) {
 			t.Fatalf("Origin aceito: %v %v", err, res)
 		}
 	})
+	t.Run("conta apagada", func(t *testing.T) {
+		b := e.user()
+		if _, err := e.pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, b); err != nil {
+			t.Fatal(err)
+		}
+		c := e.connect(b)
+		c.wantError("account_deleted")
+		c.wantClose(websocket.ClosePolicyViolation)
+	})
 	t.Run("vence com o token", func(t *testing.T) {
 		b := e.user()
 		e.exp.Store(b, time.Now().Add(300*time.Millisecond))
@@ -365,6 +374,16 @@ func TestReloadFriends(t *testing.T) {
 		t.Fatalf("depois do ReloadFriends: %+v", f)
 	}
 	e.hub.ReloadFriends(b) // offline aqui
+}
+
+func TestLocationOffDirect(t *testing.T) {
+	e := newEnv(t)
+	a, b, c := e.user(), e.user(), e.user()
+	cb := e.online(b)
+	e.hub.LocationOff(a, []string{b, c}) // a nunca conectou; c offline
+	if f := cb.read(); f.Type != wire.LocationOff || string(f.Peer) != a {
+		t.Fatalf("LocationOff: %+v", f)
+	}
 }
 
 func TestBacklog(t *testing.T) {

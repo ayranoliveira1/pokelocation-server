@@ -50,7 +50,6 @@ func TestAccessToken(t *testing.T) {
 		"vencido":              forge("EdDSA", map[string]any{"sub": a.id, "iat": now - 1000, "tv": tv, "exp": now - 60}, s.key),
 		"sem exp":              forge("EdDSA", map[string]any{"sub": a.id, "iat": iat, "tv": tv}, s.key),
 		"sem sub":              forge("EdDSA", map[string]any{"iat": iat, "tv": tv, "exp": now + 300}, s.key),
-		"sub inexistente":      forge("EdDSA", map[string]any{"sub": "00000000-0000-0000-0000-000000000000", "iat": iat, "tv": tv, "exp": now + 300}, s.key),
 		"sem tv":               forge("EdDSA", map[string]any{"sub": a.id, "iat": iat, "exp": now + 300}, s.key),
 		"tv antigo":            forge("EdDSA", map[string]any{"sub": a.id, "iat": iat, "tv": tvN - 1, "exp": now + 300}, s.key),
 		"tv futuro":            forge("EdDSA", map[string]any{"sub": a.id, "iat": iat, "tv": tvN + 1, "exp": now + 300}, s.key),
@@ -61,6 +60,12 @@ func TestAccessToken(t *testing.T) {
 			s.want(s.do("GET", "/v1/me", tok, nil), 401, "unauthorized")
 		})
 	}
+	t.Run("sub inexistente", func(t *testing.T) {
+		s := s.on(t)
+		tok := forge("EdDSA", map[string]any{"sub": "00000000-0000-0000-0000-000000000000", "iat": iat, "tv": tv,
+			"exp": now + 300}, s.key)
+		s.want(s.do("GET", "/v1/me", tok, nil), 410, "account_deleted")
+	})
 	t.Run("esquema Basic", func(t *testing.T) {
 		s := s.on(t)
 		r := s.doHeader("GET", "/v1/me", "Basic "+a.access)

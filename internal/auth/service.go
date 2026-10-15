@@ -32,6 +32,7 @@ const (
 	refreshTTL = 30 * 24 * time.Hour
 	stateTTL   = 10 * time.Minute // o usuário está no navegador, escolhendo a conta
 	codeTTL    = 60 * time.Second
+	reauthTTL  = 5 * time.Minute
 
 	// argon2id com os parâmetros da OWASP.
 	argonM, argonT, argonP, argonLen = 19 * 1024, 2, 1, 32
@@ -61,6 +62,9 @@ var (
 	errUsernameReserved = &apiError{400, "username_reserved"}
 	errUsernameTaken    = &apiError{409, "username_taken"}
 	errUsernameRequired = &apiError{403, "username_required"}
+	errReauthRequired   = &apiError{403, "reauth_required"}
+	errReauthMismatch   = &apiError{403, "reauth_mismatch"}
+	errAccountDeleted   = &apiError{410, "account_deleted"}
 	errRateLimited      = &apiError{429, "rate_limited"}
 	errBadState         = errors.New("auth: state desconhecido")
 	errArgonBusy        = errors.New("auth: argon2 sem vaga")
@@ -82,14 +86,15 @@ type tokens struct {
 }
 
 type Service struct {
-	key    ed25519.PrivateKey
-	now    func() time.Time
-	store  *Store
-	rdb    *redis.Client
-	cfg    Config
-	dummy  string        // login sem conta compara com este hash: o tempo de resposta não revela se o email existe
-	argon  chan struct{} // 19 MiB por hash: o teto de hashes simultâneos impede uma rajada de logins de estourar a RAM
-	notify func(user string, exFriends []string, groupChanges []groups.Change)
+	key     ed25519.PrivateKey
+	now     func() time.Time
+	store   *Store
+	rdb     *redis.Client
+	cfg     Config
+	dummy   string        // login sem conta compara com este hash: o tempo de resposta não revela se o email existe
+	argon   chan struct{} // 19 MiB por hash: o teto de hashes simultâneos impede uma rajada de logins de estourar a RAM
+	notify  func(user string, exFriends []string, groupChanges []groups.Change)
+	deleted func(user string, exFriends []string)
 	// ponytail: em memória e por instância; um restart ou outra instância zera a contagem do dia. Contar no banco
 	// (ex.: users.username_changed_at + contagem) se aparecer abuso.
 	names *ratelimit.Limiter
@@ -158,7 +163,7 @@ func (s *Service) refresh(ctx context.Context, token string) (tokens, error) {
 		s.notify(revoked, nil, nil)
 	}
 	if id == "" {
-		return tokens{}, errUnauthorized
+		return tokens{}, s.unknownRefresh(ctx, token)
 	}
 	return s.withAccess(id, tv, next)
 }
@@ -210,7 +215,10 @@ func (s *Service) verify(ctx context.Context, token string) (id string, named bo
 		return "", false, err
 	}
 	v, named, err := s.store.version(ctx, id)
-	if errors.Is(err, errNotFound) || err == nil && v != tv {
+	if errors.Is(err, errNotFound) {
+		return "", false, errAccountDeleted
+	}
+	if err == nil && v != tv {
 		return "", false, errUnauthorized
 	}
 	if err != nil {
@@ -306,14 +314,20 @@ func (s *Service) redirectURI() string {
 	return strings.TrimRight(s.cfg.PublicURL, "/") + "/v1/auth/google/callback"
 }
 
+// O modo fica no state porque o callback de login cria ou vincula conta, e o de reauth não pode fazer nenhum dos dois.
+const (
+	modeLogin  = "l"
+	modeReauth = "r"
+)
+
 // googleStart guarda o challenge e o state do app sob um state nosso: o do app nunca vai ao Google.
-func (s *Service) googleStart(ctx context.Context, challenge, method, appState string) (string, error) {
+func (s *Service) googleStart(ctx context.Context, mode, challenge, method, appState string) (string, error) {
 	if len(challenge) != 43 || !validB64URL(challenge) || method != "S256" ||
 		len(appState) < 16 || len(appState) > 128 || !validB64URL(appState) {
 		return "", errBadRequest
 	}
 	state := randomToken()
-	if err := s.rdb.Set(ctx, "gstate:"+state, challenge+appState, stateTTL).Err(); err != nil {
+	if err := s.rdb.Set(ctx, "gstate:"+state, mode+challenge+appState, stateTTL).Err(); err != nil {
 		return "", err
 	}
 	return googleAuthURL + "?" + url.Values{
@@ -325,18 +339,26 @@ func (s *Service) googleStart(ctx context.Context, challenge, method, appState s
 	}.Encode(), nil
 }
 
-func (s *Service) takeState(ctx context.Context, state string) (challenge, appState string, err error) {
+func (s *Service) takeState(ctx context.Context, state string) (mode, challenge, appState string, err error) {
 	v, err := s.rdb.GetDel(ctx, "gstate:"+state).Result()
-	if errors.Is(err, redis.Nil) || err == nil && len(v) < 43 {
-		return "", "", errBadState
+	if errors.Is(err, redis.Nil) || err == nil && len(v) < 44 {
+		return "", "", "", errBadState
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return v[:43], v[43:], nil
+	return v[:1], v[1:44], v[44:], nil
 }
 
-func (s *Service) googleLogin(ctx context.Context, challenge, googleCode string) (string, error) {
+// codeKey: código de reauth e de login em chaves separadas, um nunca vale pelo outro.
+func codeKey(mode, code string) string {
+	if mode == modeReauth {
+		return "grcode:" + code
+	}
+	return "gcode:" + code
+}
+
+func (s *Service) googleLogin(ctx context.Context, mode, challenge, googleCode string) (string, error) {
 	sub, raw, err := s.google(ctx, googleCode)
 	if err != nil {
 		return "", googleError{err}
@@ -345,12 +367,17 @@ func (s *Service) googleLogin(ctx context.Context, challenge, googleCode string)
 	if !ok || sub == "" {
 		return "", googleError{errors.New("identidade inválida")}
 	}
-	id, err := s.googleUser(ctx, sub, email)
+	var id string
+	if mode == modeReauth {
+		id, err = s.store.userBySub(ctx, sub)
+	} else {
+		id, err = s.googleUser(ctx, sub, email)
+	}
 	if err != nil {
 		return "", err
 	}
 	code := randomToken()
-	return code, s.rdb.Set(ctx, "gcode:"+code, challenge+id, codeTTL).Err()
+	return code, s.rdb.Set(ctx, codeKey(mode, code), challenge+id, codeTTL).Err()
 }
 
 // googleUser vincula pelo email verificado só uma conta sem sub, e a entrega limpa: o cadastro por senha não verifica
@@ -384,18 +411,116 @@ func (s *Service) googleExchange(ctx context.Context, code, verifier string) (to
 	if code == "" || verifier == "" {
 		return tokens{}, errBadRequest
 	}
-	v, err := s.rdb.GetDel(ctx, "gcode:"+code).Result()
-	if errors.Is(err, redis.Nil) {
-		return tokens{}, errInvalidGrant
-	}
+	id, err := s.takeCode(ctx, modeLogin, code, verifier)
 	if err != nil {
 		return tokens{}, err
 	}
-	sum := sha256.Sum256([]byte(verifier))
-	if len(v) <= 43 || subtle.ConstantTimeCompare([]byte(base64.RawURLEncoding.EncodeToString(sum[:])), []byte(v[:43])) != 1 {
+	if id == "" {
 		return tokens{}, errInvalidGrant
 	}
-	return s.issue(ctx, v[43:])
+	return s.issue(ctx, id)
+}
+
+// googleReauth não emite sessão: devolve o reauth_token de uso único que o DELETE /v1/me de conta só-Google exige.
+func (s *Service) googleReauth(ctx context.Context, user, code, verifier string) (string, error) {
+	if code == "" || verifier == "" {
+		return "", errBadRequest
+	}
+	id, err := s.takeCode(ctx, modeReauth, code, verifier)
+	if err != nil {
+		return "", err
+	}
+	if id != user {
+		return "", errReauthMismatch
+	}
+	t := randomToken()
+	return t, s.rdb.Set(ctx, "reauth:"+t, user, reauthTTL).Err()
+}
+
+// takeCode consome o código (uso único, inclusive com verifier errado) e devolve o id gravado no callback.
+func (s *Service) takeCode(ctx context.Context, mode, code, verifier string) (string, error) {
+	v, err := s.rdb.GetDel(ctx, codeKey(mode, code)).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", errInvalidGrant
+	}
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	if len(v) < 43 || subtle.ConstantTimeCompare([]byte(base64.RawURLEncoding.EncodeToString(sum[:])), []byte(v[:43])) != 1 {
+		return "", errInvalidGrant
+	}
+	return v[43:], nil
+}
+
+// tombstone guarda os hashes dos refresh da conta apagada até vencerem: o refresh deles responde 410, não 401.
+// ponytail: no Redis, que não persiste; depois de um restart volta a 401 (o app sai do mesmo jeito). Tabela no
+// Postgres se o 410 do refresh tiver de sobreviver a restart.
+func (s *Service) tombstone(ctx context.Context, refresh []deadRefresh) {
+	pipe := s.rdb.Pipeline()
+	now := s.now()
+	for _, r := range refresh {
+		if ttl := r.expires.Sub(now); ttl > 0 {
+			pipe.Set(ctx, goneKey(r.hash), "", ttl)
+		}
+	}
+	if pipe.Len() > 0 {
+		if _, err := pipe.Exec(ctx); err != nil {
+			logErr("tombstone", err)
+		}
+	}
+}
+
+func goneKey(hash []byte) string { return "gone:" + b64.EncodeToString(hash) }
+
+func (s *Service) unknownRefresh(ctx context.Context, token string) error {
+	n, err := s.rdb.Exists(ctx, goneKey(sha(token))).Result()
+	if err == nil && n > 0 {
+		return errAccountDeleted
+	}
+	return errUnauthorized
+}
+
+// deleteAccount exige reautenticação: senha para conta com senha; senão o reauth_token do googleReauth (consumido
+// aqui, mesmo que a exclusão falhe depois).
+func (s *Service) deleteAccount(ctx context.Context, id, password, reauth string) error {
+	hash, err := s.store.passwordHash(ctx, id)
+	if errors.Is(err, errNotFound) {
+		return errAccountDeleted
+	}
+	if err != nil {
+		return err
+	}
+	switch {
+	case hash != nil && password == "":
+		return errReauthRequired
+	case hash != nil:
+		ok, err := s.checkPassword(ctx, *hash, password)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errInvalidCreds
+		}
+	case reauth == "":
+		return errReauthRequired
+	default:
+		v, err := s.rdb.GetDel(ctx, "reauth:"+reauth).Result()
+		if errors.Is(err, redis.Nil) || err == nil && v != id {
+			return errReauthRequired
+		}
+		if err != nil {
+			return err
+		}
+	}
+	ex, changes, refresh, err := s.store.deleteUser(ctx, id)
+	if err != nil {
+		return err
+	}
+	s.tombstone(context.WithoutCancel(ctx), refresh)
+	s.deleted(id, ex)
+	s.notify(id, ex, changes)
+	return nil
 }
 
 var googleHTTP = &http.Client{Timeout: 10 * time.Second}

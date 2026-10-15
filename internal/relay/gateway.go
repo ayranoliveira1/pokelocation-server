@@ -311,6 +311,16 @@ func (h *Hub) GroupChanged(groupID string, users []string) {
 	ob.release()
 }
 
+// LocationOff vai direto a cada um de to: não depende de user ter conexão (e lista de amigos) nesta instância.
+func (h *Hub) LocationOff(user string, to []string) {
+	ob := getOut()
+	ob.b = wire.AppendLocationOff(ob.b, []byte(user))
+	for _, u := range to {
+		h.deliver([]byte(u), ob, true)
+	}
+	ob.release()
+}
+
 // Buf: buffer do pool do Hub para montar o frame do SendFriends.
 func Buf() []byte {
 	ob := getOut()
@@ -373,6 +383,7 @@ func (h *Hub) reloadLocal(id string) {
 
 var (
 	errRevoked = errors.New("relay: token revogado")
+	errGone    = errors.New("relay: conta apagada")
 	errNoName  = errors.New("relay: conta sem @nome")
 )
 
@@ -382,7 +393,10 @@ func (h *Hub) session(u *user, id string, version int) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), h.dbWait)
 	defer cancel()
 	current, named, cutoff, friends, coMembers, err := h.store.session(ctx, id)
-	if errors.Is(err, errNoUser) || err == nil && current != version {
+	if errors.Is(err, errNoUser) {
+		return 0, errGone
+	}
+	if err == nil && current != version {
 		return 0, errRevoked
 	}
 	if err != nil {

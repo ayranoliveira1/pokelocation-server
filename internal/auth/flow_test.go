@@ -308,7 +308,7 @@ func TestMeDeletedUser(t *testing.T) {
 	if _, err := e.pool.Exec(context.Background(), `DELETE FROM users`); err != nil {
 		t.Fatal(err)
 	}
-	wantErr(t, e.req("GET", "/v1/me", "", tr.Access), 401, "unauthorized")
+	wantErr(t, e.req("GET", "/v1/me", "", tr.Access), 410, "account_deleted")
 	wantErr(t, e.req("GET", "/v1/me", "", ""), 401, "unauthorized")
 }
 
@@ -329,7 +329,13 @@ func fakeGoogle(_ context.Context, code string) (string, string, error) {
 
 func (e *env) googleCallback(googleCode, challenge, appState string) *url.URL {
 	e.t.Helper()
-	w := e.req("GET", "/v1/auth/google/start?code_challenge="+challenge+"&code_challenge_method=S256&state="+appState, "", "")
+	return e.googleFlow("", googleCode, challenge, appState)
+}
+
+func (e *env) googleFlow(startExtra, googleCode, challenge, appState string) *url.URL {
+	e.t.Helper()
+	w := e.req("GET", "/v1/auth/google/start?code_challenge="+challenge+"&code_challenge_method=S256&state="+appState+
+		startExtra, "", "")
 	if w.Code != 302 {
 		e.t.Fatalf("start: %d %s", w.Code, w.Body.String())
 	}

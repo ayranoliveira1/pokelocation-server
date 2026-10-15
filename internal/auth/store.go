@@ -32,10 +32,15 @@ const (
 	qDelDeviceOfUser    = `DELETE FROM devices WHERE user_id = $1`
 	qDelPrekeysOfUser   = `DELETE FROM one_time_prekeys WHERE user_id = $1`
 	qDelEnvelopesOfUser = `DELETE FROM envelopes WHERE recipient_id = $1 OR sender_id = $1`
-	qMe                 = `SELECT email, friend_code, username FROM users WHERE id = $1`
-	qUsername           = `SELECT username FROM users WHERE id = $1`
-	qSetUsername        = `UPDATE users SET username = $2 WHERE id = $1`
-	qNewRefresh         = `WITH r AS (
+	qMe                 = `SELECT email, friend_code, username, password_hash IS NOT NULL FROM users WHERE id = $1`
+	qPasswordHash       = `SELECT password_hash FROM users WHERE id = $1`
+	qLockUserForDelete  = `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`
+	qDelRefreshReturn   = `DELETE FROM refresh_tokens WHERE user_id = $1 RETURNING token_hash, expires_at`
+	// O resto sai pelo ON DELETE CASCADE (devices, prekeys, blocks, envelopes enviados e recebidos).
+	qDeleteUser  = `DELETE FROM users WHERE id = $1`
+	qUsername    = `SELECT username FROM users WHERE id = $1`
+	qSetUsername = `UPDATE users SET username = $2 WHERE id = $1`
+	qNewRefresh  = `WITH r AS (
 			INSERT INTO refresh_tokens (user_id, family_id, token_hash, expires_at)
 			VALUES ($1, gen_random_uuid(), $2, $3))
 		SELECT token_version FROM users WHERE id = $1`
@@ -99,11 +104,14 @@ func (s *Store) userBySub(ctx context.Context, sub string) (string, error) {
 	return id, err
 }
 
-// version: id que nem é uuid também é errNotFound (o sub vem do token, não do banco).
+// version: id que nem é uuid é errUnauthorized, não conta apagada (o sub vem do token, não do banco).
 func (s *Store) version(ctx context.Context, id string) (v int, named bool, err error) {
 	err = s.pool.QueryRow(ctx, qVersion, id).Scan(&v, &named)
 	var pg *pgconn.PgError
-	if errors.Is(err, pgx.ErrNoRows) || errors.As(err, &pg) && pg.Code == "22P02" {
+	if errors.As(err, &pg) && pg.Code == "22P02" {
+		return v, false, errUnauthorized
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
 		return v, false, errNotFound
 	}
 	return v, named, err
@@ -156,12 +164,68 @@ func (s *Store) linkGoogle(ctx context.Context, id, sub string) (bool, []string,
 	return ok, ex, changes, nil
 }
 
-func (s *Store) me(ctx context.Context, id string) (email *string, code string, username *string, err error) {
-	err = s.pool.QueryRow(ctx, qMe, id).Scan(&email, &code, &username)
+func (s *Store) me(ctx context.Context, id string) (email *string, code string, username *string, hasPassword bool,
+	err error) {
+	err = s.pool.QueryRow(ctx, qMe, id).Scan(&email, &code, &username, &hasPassword)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = errNotFound
 	}
-	return email, code, username, err
+	return email, code, username, hasPassword, err
+}
+
+func (s *Store) passwordHash(ctx context.Context, id string) (*string, error) {
+	var h *string
+	err := s.pool.QueryRow(ctx, qPasswordHash, id).Scan(&h)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = errNotFound
+	}
+	return h, err
+}
+
+type deadRefresh struct {
+	hash    []byte
+	expires time.Time
+}
+
+// A saída dos grupos vem antes do DELETE: o CASCADE de groups.owner_id apagaria o grupo de todos em vez de passá-lo
+// adiante. Trava o usuário antes de tudo, como o vínculo Google: espera a rotação em voo.
+func (s *Store) deleteUser(ctx context.Context, id string) ([]string, []groups.Change, []deadRefresh, error) {
+	var ex []string
+	var changes []groups.Change
+	var refresh []deadRefresh
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, qLockUserForDelete, id).Scan(new(int))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, qLinkFriendships, id)
+		if err != nil {
+			return err
+		}
+		if ex, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+			return err
+		}
+		if changes, err = groups.LeaveAllTx(ctx, tx, id); err != nil {
+			return err
+		}
+		if rows, err = tx.Query(ctx, qDelRefreshReturn, id); err != nil {
+			return err
+		}
+		if refresh, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (d deadRefresh, err error) {
+			return d, r.Scan(&d.hash, &d.expires)
+		}); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, qDeleteUser, id)
+		return err
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return ex, changes, refresh, nil
 }
 
 func (s *Store) username(ctx context.Context, id string) (*string, error) {

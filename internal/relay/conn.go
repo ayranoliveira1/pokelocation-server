@@ -415,6 +415,10 @@ func (c *Conn) auth() bool {
 		c.kill(websocket.ClosePolicyViolation, "unauthorized")
 		return false
 	}
+	if errors.Is(err, errGone) {
+		c.kill(websocket.ClosePolicyViolation, "account_deleted")
+		return false
+	}
 	if errors.Is(err, errNoName) {
 		c.kill(websocket.ClosePolicyViolation, "username_required")
 		return false

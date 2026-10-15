@@ -18,6 +18,7 @@ func TestRotasExigemToken(t *testing.T) {
 	s := start(t)
 	for _, r := range []struct{ m, p string }{
 		{"GET", "/v1/me"},
+		{"DELETE", "/v1/me"},
 		{"GET", "/v1/friends"},
 		{"POST", "/v1/friends/requests"},
 		{"POST", "/v1/friends/requests/" + nobody + "/accept"},

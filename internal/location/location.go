@@ -130,6 +130,20 @@ func (s *Service) handle(id string, f wire.Frame) {
 	s.send(id, frame)
 }
 
+// Forget: conta apagada. O próximo flush apaga loc:{id}, mesmo com uma posição ainda por gravar.
+func (s *Service) Forget(id string) {
+	sh := s.shard(id)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	u := sh.m[id]
+	if u == nil {
+		u = &user{id: []byte(id), key: "loc:" + id}
+		sh.m[id] = u
+	}
+	u.seen, u.off, u.todo = s.now(), true, del
+	u.payload = u.payload[:0]
+}
+
 func (s *Service) Run(ctx context.Context) {
 	t := time.NewTicker(flushEvery)
 	defer t.Stop()

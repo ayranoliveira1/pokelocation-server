@@ -21,8 +21,11 @@ sudo netfilter-persistent save
 curl -fsSL https://get.docker.com | sudo sh
 echo '{"log-driver": "local"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
 sudo usermod -aG docker ubuntu && exit   # entre de novo para valer o grupo
-git clone -b development <url-do-repo> ~/pokelocation-server
+git clone -b development git@github.com:ayranoliveira1/pokelocation-server.git ~/pokelocation-server
 ```
+
+O repo é privado: na VM, `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''` e cadastre a `.pub` em Settings → Deploy
+keys do repo, **sem** permissão de escrita, antes do `git clone`.
 
 O driver `local` rotaciona os logs dos containers (o `json-file` padrão cresce sem limite).
 

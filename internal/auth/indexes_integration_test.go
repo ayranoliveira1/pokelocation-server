@@ -47,6 +47,13 @@ func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 		{qMarkUsed, []any{s.TokenHash, now}, [][]string{{"refresh_tokens_token_hash_key"}}},
 		{qRevokeLookup, []any{s.TokenHash}, [][]string{{"refresh_tokens_token_hash_key"}}},
 		{qClearFCMOfUser, []any{s.User}, [][]string{{"devices_pkey"}}},
+		{qPasswordHash, []any{s.User}, [][]string{{"users_pkey"}}},
+		{qLockUserForDelete, []any{s.User}, [][]string{{"users_pkey"}}},
+		{qDelRefreshReturn, []any{s.User}, [][]string{{"refresh_tokens_user"}}},
+		{qDeleteUser, []any{s.User}, [][]string{{"users_pkey"}}},
+		// o que o ON DELETE CASCADE do qDeleteUser roda e as linhas acima não cobrem
+		{`DELETE FROM groups WHERE owner_id = $1`, []any{s.User}, [][]string{{"groups_owner"}}},
+		{`DELETE FROM group_members WHERE user_id = $1`, []any{s.User}, [][]string{{"group_members_user"}}},
 	} {
 		for _, group := range c.indexes {
 			testdb.RequireIndex(t, pool, c.sql, c.args, group...)
