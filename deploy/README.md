@@ -1,71 +1,76 @@
-# Deploy na VM (Oracle Cloud Always Free)
+# Deploy na VPS
 
-VM.Standard.A1.Flex (ARM64, 2 OCPU, 12 GB), Ubuntu 24.04, São Paulo. Domínio `pokelocation.waveplay.xyz` com
-registro A para o IP público da VM na Cloudflare em **DNS only** (o Caddy tira o certificado do Let's Encrypt sozinho).
+Ubuntu 24.04 com Docker e o nginx do sistema nas portas 80/443, que pode ter outros sites e containers. Nada aqui
+mexe neles: sem Caddy, sem portas publicadas além do servidor em `127.0.0.1:8095`, sem `daemon.json` nem restart do
+Docker, e um site novo no nginx em vez de editar os existentes. Domínio
+`pokelocation.waveplay.xyz` com registro A para o IP da VPS na Cloudflare em **DNS only**.
 
-## 1. Rede
+## 1. Código
 
-No console da Oracle, na Security List da subnet da VM: ingress TCP 80 e 443 de `0.0.0.0/0`.
-
-A imagem Ubuntu da Oracle traz um `REJECT` no fim da chain INPUT. Libere 80/443 **antes** de instalar o Docker, para
-o `save` não gravar as regras do Docker:
-
-```sh
-sudo iptables -I INPUT -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW -j ACCEPT
-sudo netfilter-persistent save
-```
-
-## 2. Docker e código
+O repo é privado. Na VPS, uma chave só para ele (não a `id_ed25519`, que pode ser de outro projeto):
 
 ```sh
-curl -fsSL https://get.docker.com | sudo sh
-echo '{"log-driver": "local"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
-sudo usermod -aG docker ubuntu && exit   # entre de novo para valer o grupo
-git clone -b development git@github.com:ayranoliveira1/pokelocation-server.git ~/pokelocation-server
+ssh-keygen -t ed25519 -f ~/.ssh/pokelocation_deploy -N '' -C pokelocation-deploy
+printf 'Host github-pokelocation\n  HostName github.com\n  User git\n  IdentityFile ~/.ssh/pokelocation_deploy\n  IdentitiesOnly yes\n' >> ~/.ssh/config
 ```
 
-O repo é privado: na VM, `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''` e cadastre a `.pub` em Settings → Deploy
-keys do repo, **sem** permissão de escrita, antes do `git clone`.
+Cadastre a `.pub` em Settings → Deploy keys do repo, **sem** permissão de escrita. Depois:
 
-O driver `local` rotaciona os logs dos containers (o `json-file` padrão cresce sem limite).
+```sh
+sudo install -d -o "$USER" -g "$USER" /opt/pokelocation-server /opt/pokelocation-static
+git clone -b main github-pokelocation:ayranoliveira1/pokelocation-server.git /opt/pokelocation-server
+```
 
-## 3. Segredos
+`/opt` em vez da home: o nginx (`www-data`) lê `deploy/site/privacy.html` e a home é `750`.
+
+## 2. Segredos
 
 Do Mac, sem abrir o arquivo:
 
 ```sh
-ssh ubuntu@<ip> 'mkdir -m 700 -p ~/pokelocation-secrets'
-scp ~/pokelocation-secrets/fcm-service-account.json ubuntu@<ip>:pokelocation-secrets/
+ssh <usuário>@<ip> 'mkdir -m 700 -p ~/pokelocation-secrets'
+scp ~/pokelocation-secrets/fcm-service-account.json <usuário>@<ip>:pokelocation-secrets/
 ```
 
-Na VM, o servidor roda como o usuário 65532 (distroless nonroot) e precisa ler o JSON:
+Na VPS, o servidor roda como o usuário 65532 (distroless nonroot) e precisa ler o JSON:
 
 ```sh
 sudo chown 65532 ~/pokelocation-secrets/fcm-service-account.json
 sudo chmod 400 ~/pokelocation-secrets/fcm-service-account.json
 ```
 
-`~/pokelocation-server/.env` (`chmod 600`), a partir do `.env.example`:
+`/opt/pokelocation-server/.env` (`chmod 600`):
 
 ```sh
 POSTGRES_PASSWORD=<openssl rand -base64 32>
 AUTH_SIGNING_KEY=<openssl rand -base64 32>
 COMPOSE_FILE=docker-compose.yml:deploy/compose.prod.yml
 PUBLIC_URL=https://pokelocation.waveplay.xyz
-SITE_ADDRESS=pokelocation.waveplay.xyz
-FCM_CREDENTIALS_FILE=/home/ubuntu/pokelocation-secrets/fcm-service-account.json
-GOMEMLIMIT=6GiB
+FCM_CREDENTIALS_FILE=/home/<usuário>/pokelocation-secrets/fcm-service-account.json
+GOMEMLIMIT=2GiB
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
 BACKUP_PAR_URL=
 ```
 
-`GOMEMLIMIT=6GiB`: metade da VM, com o resto para Postgres, Redis, Caddy e o cache de disco. Os `.so.gz` da
-libsignal são só reserva do download do GitHub; para servi-los, copie `tools/libsignal/out/0.86.5` do repo do app
-para a VM e aponte `LIBSIGNAL_DIR` para lá.
+Os `.so.gz` da libsignal são reserva do download do GitHub: copie `tools/libsignal/out/0.86.5` do repo do app para
+`/opt/pokelocation-static/libsignal-0.86.5/`.
+
+## 3. nginx e TLS
+
+```sh
+sudo cp /opt/pokelocation-server/deploy/nginx.conf /etc/nginx/sites-available/pokelocation.waveplay.xyz
+sudo ln -s /etc/nginx/sites-available/pokelocation.waveplay.xyz /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d pokelocation.waveplay.xyz --redirect
+```
+
+O certbot só edita o arquivo deste site e renova sozinho pelo timer que já existe.
 
 ## 4. Subir e conferir
 
 ```sh
-cd ~/pokelocation-server
+cd /opt/pokelocation-server
 docker compose up -d --build
 curl -fsS https://pokelocation.waveplay.xyz/healthz
 curl -fsSI https://pokelocation.waveplay.xyz/privacy
@@ -85,7 +90,8 @@ para renovar, porque depois dela o backup só falha no `journalctl`.
 
 ```sh
 deploy/backup.sh && echo ok          # teste: o objeto pokelocation-<data>.sql.gz aparece no bucket
-sudo cp deploy/pokelocation-backup.service deploy/pokelocation-backup.timer /etc/systemd/system/
+sed "s/^User=.*/User=$USER/" deploy/pokelocation-backup.service | sudo tee /etc/systemd/system/pokelocation-backup.service >/dev/null
+sudo cp deploy/pokelocation-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now pokelocation-backup.timer
 systemctl list-timers pokelocation-backup.timer
 journalctl -u pokelocation-backup.service   # falhas aparecem aqui
@@ -98,7 +104,7 @@ Roda entre 03:30 e 03:45 de Brasília. Com `BACKUP_PAR_URL` vazio, sai sem fazer
 Baixe o `.sql.gz` pelo console (a PAR é só de escrita) e copie para a VM. O dump apaga e recria as tabelas:
 
 ```sh
-cd ~/pokelocation-server
+cd /opt/pokelocation-server
 docker compose stop server
 gunzip -c pokelocation-<data>.sql.gz | docker compose exec -T postgres psql -U pokelocation -d pokelocation -v ON_ERROR_STOP=1 -1
 docker compose start server

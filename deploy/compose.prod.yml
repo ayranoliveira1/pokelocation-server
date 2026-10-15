@@ -1,6 +1,18 @@
 # Produção: COMPOSE_FILE=docker-compose.yml:deploy/compose.prod.yml no .env (deploy/README.md).
+# O nginx do sistema termina o TLS (deploy/nginx.conf), então sem Caddy e nada publicado além do
+# servidor em 127.0.0.1. Log por serviço, sem mexer no daemon.json do Docker.
 services:
+  postgres:
+    ports: !reset []
+    logging: {driver: local}
+
+  redis:
+    ports: !reset []
+    logging: {driver: local}
+
   server:
+    ports: ["127.0.0.1:8095:8080"]
+    logging: {driver: local}
     environment:
       FCM_CREDENTIALS: /run/secrets/fcm.json
     volumes:
@@ -9,3 +21,6 @@ services:
         target: /run/secrets/fcm.json
         read_only: true
         bind: {create_host_path: false} # arquivo ausente falha na subida em vez de virar diretório vazio
+
+  caddy:
+    profiles: [dev]
