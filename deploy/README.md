@@ -81,10 +81,10 @@ Atualizar: `git pull && docker compose up -d --build`. As migrações rodam na s
 
 ## 5. Deploy automático
 
-Um runner próprio do GitHub Actions na VPS roda `.github/workflows/deploy.yml` a cada push na `main`: `go vet`, os
-testes com `-race` (os containers de teste sobem no Docker da VPS), e só se passarem `git merge --ff-only` +
-`docker compose up -d --build` em `/opt/pokelocation-server` e o `/healthz`. Push em outra branch não roda nada.
-Runner próprio não gasta minutos do GitHub. O usuário do runner precisa estar no grupo `docker` e ter a deploy key.
+Um runner próprio do GitHub Actions na VPS roda `.github/workflows/deploy.yml` a cada push na `main`. O job `teste`
+roda `go vet` e os testes com `-race` (os containers de teste sobem no Docker da VPS); o job `deploy` só começa se ele
+passar: `git merge --ff-only` + `docker compose up -d --build` em `/opt/pokelocation-server` e o `/healthz`. Push em outra branch não roda nada.
+Runner próprio não gasta minutos do GitHub. O usuário do runner precisa estar no grupo `docker`, ter a deploy key e o `gcc` (o `-race` usa cgo).
 
 Token de registro (vale 1 h), gerado na máquina com o `gh`:
 

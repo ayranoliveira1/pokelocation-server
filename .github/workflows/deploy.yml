@@ -1,5 +1,5 @@
 # Runner próprio na VPS (deploy/README.md): não gasta minutos do GitHub. Só push na main; teste falhou = sem deploy.
-name: deploy
+name: teste e deploy
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 concurrency: deploy
 
 jobs:
-  deploy:
+  teste:
     runs-on: [self-hosted, pokelocation]
     timeout-minutes: 30
     steps:
@@ -27,8 +27,15 @@ jobs:
         if: always()
         run: docker ps -aq --filter label=org.testcontainers=true --filter status=exited --filter status=created | xargs -r docker rm -f
 
-      - name: deploy
+  deploy:
+    needs: teste
+    runs-on: [self-hosted, pokelocation]
+    timeout-minutes: 15
+    defaults:
+      run:
         working-directory: /opt/pokelocation-server
+    steps:
+      - name: atualiza e sobe
         run: |
           git fetch -q origin main
           git merge -q --ff-only "$GITHUB_SHA"
@@ -40,5 +47,5 @@ jobs:
             curl -fsS -o /dev/null http://127.0.0.1:8095/healthz && exit 0
             sleep 2
           done
-          cd /opt/pokelocation-server && docker compose ps
+          docker compose ps
           exit 1
