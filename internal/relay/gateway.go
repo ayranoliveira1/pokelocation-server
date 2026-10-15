@@ -37,12 +37,16 @@ const (
 	// 25 grupos × 49 outros membros, com folga
 	maxGroupContacts = 1300
 	chatPerMin       = 60 // Envelope + GroupEnvelope; um de grupo conta 1
-	pingEvery        = 30 * time.Second
-	idleWait         = 70 * time.Second // dois pings sem resposta
-	writeWait        = 10 * time.Second
-	dbWait           = 5 * time.Second
-	cleanupBatch     = 1000
-	batchWait        = 5 * time.Second
+	// destinatários por GroupEnvelope: um grupo de 50 manda ~10 por minuto
+	groupRcptPerMin = 500
+	// sem isso, um grupo de contas que nunca conectam enche o disco
+	maxPendingPerRecipient = 1000
+	pingEvery              = 30 * time.Second
+	idleWait               = 70 * time.Second // dois pings sem resposta
+	writeWait              = 10 * time.Second
+	dbWait                 = 5 * time.Second
+	cleanupBatch           = 1000
+	batchWait              = 5 * time.Second
 )
 
 type Hub struct {
@@ -58,6 +62,7 @@ type Hub struct {
 	afterRegister  func()
 	cl             *cluster // nil = uma instância só (EnableCluster liga)
 	chat           *ratelimit.Limiter
+	groupRcpt      *ratelimit.Limiter
 
 	// Notify: envelope gravado para quem não está conectado nesta instância. nil = desligado.
 	Notify func(user string)
@@ -127,7 +132,7 @@ func (fs *friendSet) has(peer []byte) bool {
 func New(pool *pgxpool.Pool, parse func(token string) (string, time.Time, int, error),
 	onLocation func(c *Conn, f wire.Frame)) *Hub {
 	h := &Hub{store: &Store{pool: pool}, parse: parse, onLocation: onLocation, authWait: 5 * time.Second, dbWait: dbWait,
-		chat: ratelimit.New(chatPerMin)}
+		chat: ratelimit.New(chatPerMin), groupRcpt: ratelimit.New(groupRcptPerMin)}
 	h.up = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,

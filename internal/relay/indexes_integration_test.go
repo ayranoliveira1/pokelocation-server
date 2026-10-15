@@ -23,10 +23,12 @@ func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 		"group_members_pkey", "blocks_pkey"} {
 		testdb.RequireIndex(t, pool, qCircle, circle, idx)
 	}
-	group := []any{s.Recipient, s.Sender, "m", []byte("p")}
-	for _, idx := range []string{"group_members_pkey", "blocks_pkey"} {
+	group := []any{s.Recipient, s.Sender, "m", []byte("p"), maxPendingPerRecipient}
+	for _, idx := range []string{"group_members_pkey", "blocks_pkey", "envelopes_recipient"} {
 		testdb.RequireIndex(t, pool, qGroupSend, group, idx)
 	}
+	testdb.RequireIndex(t, pool, qInsertEnvelope, []any{s.Recipient, s.Sender, "m", []byte("p"), maxPendingPerRecipient},
+		"envelopes_recipient")
 	testdb.RequireIndex(t, pool, qAck, []any{s.Recipient, s.Sender, s.MsgID},
 		"envelopes_sender_id_recipient_id_client_msg_id_key")
 	testdb.RequireIndex(t, pool, qAckIDs, []any{s.Recipient, []int64{1, 2}}, "envelopes_recipient", "envelopes_pkey")

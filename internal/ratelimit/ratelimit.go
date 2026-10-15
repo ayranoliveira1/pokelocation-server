@@ -32,6 +32,21 @@ func NewWindow(n int, window time.Duration) *Limiter {
 func (l *Limiter) Allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.bucket(key, now).AllowN(now, 1)
+}
+
+// Debit desconta n depois do fato, mesmo sem saldo: a dívida (até um balde) recusa os próximos Allow até a recarga.
+func (l *Limiter) Debit(key string, now time.Time, n int) {
+	if n <= 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.bucket(key, now).ReserveN(now, min(n, l.n))
+}
+
+// bucket: chamar com l.mu.
+func (l *Limiter) bucket(key string, now time.Time) *rate.Limiter {
 	if now.Sub(l.swept) > l.window { // parado uma janela inteira = balde cheio = igual a um novo: pode sair do mapa
 		for k, b := range l.m {
 			if now.Sub(b.seen) > l.window {
@@ -46,5 +61,5 @@ func (l *Limiter) Allow(key string, now time.Time) bool {
 		l.m[key] = b
 	}
 	b.seen = now
-	return b.l.AllowN(now, 1)
+	return b.l
 }

@@ -22,8 +22,13 @@ const (
 			WHERE gm1.user_id = $1 AND gm2.user_id <> $1 AND NOT EXISTS (SELECT 1 FROM blocks b
 				WHERE (b.blocker_id = $1 AND b.blocked_id = gm2.user_id) OR (b.blocker_id = gm2.user_id AND b.blocked_id = $1))
 			LIMIT $3)`
-	qInsertEnvelope = `INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload)
-		VALUES ($1, $2, $3, $4) ON CONFLICT (sender_id, recipient_id, client_msg_id) DO NOTHING`
+	qInsertEnvelope = `WITH room AS (SELECT count(*) < $5 OR EXISTS (SELECT 1 FROM envelopes
+				WHERE sender_id = $2 AND recipient_id = $1 AND client_msg_id = $3) AS ok
+			FROM (SELECT 1 FROM envelopes WHERE recipient_id = $1 LIMIT $5) q),
+		ins AS (INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload)
+			SELECT $1, $2, $3, $4 FROM room WHERE ok
+			ON CONFLICT (sender_id, recipient_id, client_msg_id) DO NOTHING RETURNING 1)
+		SELECT (SELECT ok FROM room), EXISTS (SELECT 1 FROM ins)`
 	qAck     = `DELETE FROM envelopes WHERE recipient_id = $1 AND sender_id = $2 AND client_msg_id = $3`
 	qAckIDs  = `DELETE FROM envelopes WHERE recipient_id = $1 AND id = ANY($2)`
 	qSession = `SELECT u.token_version, u.username IS NOT NULL,
@@ -41,13 +46,15 @@ const (
 		WHERE recipient_id = $1 AND id > $2 AND id <= $3 ORDER BY id LIMIT $4`
 	// Membresia conferida no mesmo comando que grava: quem saiu do grupo entre a checagem e o INSERT não recebe cópia.
 	qGroupSend = `WITH member AS (SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2),
-		rcpt AS (SELECT gm.user_id FROM group_members gm, member
+		elig AS (SELECT gm.user_id FROM group_members gm, member
 			WHERE gm.group_id = $1 AND gm.user_id <> $2 AND NOT EXISTS (SELECT 1 FROM blocks b
 				WHERE (b.blocker_id = $2 AND b.blocked_id = gm.user_id) OR (b.blocker_id = gm.user_id AND b.blocked_id = $2))),
+		rcpt AS (SELECT user_id FROM elig
+			WHERE (SELECT count(*) FROM (SELECT 1 FROM envelopes e WHERE e.recipient_id = elig.user_id LIMIT $5) q) < $5),
 		ins AS (INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload, group_id)
 			SELECT user_id, $2, $3, $4, $1 FROM rcpt
 			ON CONFLICT (sender_id, recipient_id, client_msg_id) DO NOTHING RETURNING recipient_id)
-		SELECT EXISTS (SELECT 1 FROM member), ARRAY(SELECT recipient_id::text FROM ins)`
+		SELECT EXISTS (SELECT 1 FROM member), ARRAY(SELECT recipient_id::text FROM ins), (SELECT count(*) FROM elig)`
 	qCleanup = `DELETE FROM envelopes WHERE id = ANY(ARRAY(
 			SELECT id FROM envelopes WHERE created_at < now() - interval '30 days' ORDER BY created_at LIMIT $1))`
 )
@@ -67,16 +74,18 @@ func (s *Store) circle(ctx context.Context, user string) (friends, coMembers []s
 	return friends, coMembers, err
 }
 
+// groupSend: eligible conta os membros que receberiam uma cópia, inclusive os de fila cheia.
 func (s *Store) groupSend(ctx context.Context, group, from, msgID string, payload []byte) (member bool,
-	recipients []string, err error) {
-	err = s.pool.QueryRow(ctx, qGroupSend, group, from, msgID, payload).Scan(&member, &recipients)
-	return member, recipients, err
+	recipients []string, eligible int, err error) {
+	err = s.pool.QueryRow(ctx, qGroupSend, group, from, msgID, payload, maxPendingPerRecipient).
+		Scan(&member, &recipients, &eligible)
+	return member, recipients, eligible, err
 }
 
-// insert: false = reenvio, ignorado.
-func (s *Store) insert(ctx context.Context, to, from string, msgID string, payload []byte) (bool, error) {
-	tag, err := s.pool.Exec(ctx, qInsertEnvelope, to, from, msgID, payload)
-	return tag.RowsAffected() == 1, err
+// insert: room false = fila do destinatário cheia, nada gravado; fresh false = reenvio, ignorado.
+func (s *Store) insert(ctx context.Context, to, from string, msgID string, payload []byte) (room, fresh bool, err error) {
+	err = s.pool.QueryRow(ctx, qInsertEnvelope, to, from, msgID, payload, maxPendingPerRecipient).Scan(&room, &fresh)
+	return room, fresh, err
 }
 
 func (s *Store) ack(ctx context.Context, recipient, from, msgID string) error {

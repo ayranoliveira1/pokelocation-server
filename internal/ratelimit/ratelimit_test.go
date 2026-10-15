@@ -63,3 +63,22 @@ func TestWindow(t *testing.T) {
 		t.Fatal("u parado há mais de uma janela continua no mapa")
 	}
 }
+
+func TestDebit(t *testing.T) {
+	l := New(10)
+	t0 := time.Unix(1_000_000, 0)
+	l.Allow("a", t0)
+	l.Debit("a", t0, 4)
+	if !l.Allow("a", t0) { // 10 - 1 - 4 = 5
+		t.Fatal("recusou com saldo")
+	}
+	l.Debit("a", t0, 100) // limitado ao balde: 4 - 10 = -6, pagos em 36 s
+	if l.Allow("a", t0.Add(35*time.Second)) {
+		t.Fatal("aceitou ainda devendo")
+	}
+	if !l.Allow("a", t0.Add(43*time.Second)) {
+		t.Fatal("dívida não foi paga pela recarga")
+	}
+	l.Debit("a", t0, 0)
+	l.Debit("b", t0, -1)
+}

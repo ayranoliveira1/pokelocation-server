@@ -29,6 +29,10 @@ func TestZeroAllocs(t *testing.T) {
 			h.relayEnvelope(ca, f, true)
 		},
 		"limite de chat": func() { h.chat.Allow(a, time.Unix(0, 0)) },
+		"limite de grupo": func() {
+			h.groupRcpt.Allow(a, time.Unix(0, 0))
+			h.groupRcpt.Debit(a, time.Unix(0, 0), 49)
+		},
 		"posição": func() {
 			ob := getOut()
 			ob.b = append(ob.b, loc...)

@@ -521,12 +521,16 @@ func (c *Conn) envelope(f wire.Frame) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.hub.dbWait)
-	fresh, err := c.hub.store.insert(ctx, string(f.Peer), c.user, string(f.MsgID), f.Payload)
+	room, fresh, err := c.hub.store.insert(ctx, string(f.Peer), c.user, string(f.MsgID), f.Payload)
 	cancel()
 	if err != nil {
 		// sem Ack: o app mantém o envelope na fila dele e reenvia ao reconectar
 		logDB("relay: envelope", err)
 		c.kill(websocket.CloseInternalServerErr, "")
+		return
+	}
+	if !room {
+		c.sendError("recipient_full") // sem Ack: o app reenvia depois
 		return
 	}
 	c.hub.relayEnvelope(c, f, fresh)
@@ -537,12 +541,13 @@ func (c *Conn) groupEnvelope(f wire.Frame) {
 		c.sendError("bad_frame")
 		return
 	}
-	if !c.hub.chat.Allow(c.user, time.Now()) {
+	now := time.Now()
+	if !c.hub.chat.Allow(c.user, now) || !c.hub.groupRcpt.Allow(c.user, now) {
 		c.sendError("rate_limited")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.hub.dbWait)
-	member, recipients, err := c.hub.store.groupSend(ctx, string(f.Group), c.user, string(f.MsgID), f.Payload)
+	member, recipients, eligible, err := c.hub.store.groupSend(ctx, string(f.Group), c.user, string(f.MsgID), f.Payload)
 	cancel()
 	if err != nil {
 		logDB("relay: grupo", err)
@@ -553,6 +558,7 @@ func (c *Conn) groupEnvelope(f wire.Frame) {
 		c.sendError("forbidden") // não-membro e grupo inexistente dão o mesmo erro
 		return
 	}
+	c.hub.groupRcpt.Debit(c.user, now, eligible-1)
 	c.hub.relayGroup(c, f, recipients)
 }
 

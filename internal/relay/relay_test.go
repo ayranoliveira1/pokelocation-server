@@ -60,6 +60,7 @@ func newEnvPool(t *testing.T, pool *pgxpool.Pool) *env {
 	})
 	e.hub.authWait = 300 * time.Millisecond
 	e.hub.chat = ratelimit.New(1 << 20) // rajadas dos testes; TestChatRateLimit põe o limite de verdade
+	e.hub.groupRcpt = ratelimit.New(1 << 20)
 	mux := http.NewServeMux()
 	e.hub.Routes(mux, func(h http.HandlerFunc) http.Handler { // X-User no lugar do Bearer
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -938,6 +939,96 @@ func TestChatRateLimit(t *testing.T) {
 	ca.wantError("rate_limited")
 	if n := e.count(`SELECT count(*) FROM envelopes WHERE client_msg_id = 'demais'`); n != 0 {
 		t.Fatalf("gravou acima do limite: %d", n)
+	}
+}
+
+func TestGroupRecipientLimit(t *testing.T) {
+	e := newEnv(t)
+	e.hub.chat = ratelimit.New(chatPerMin)
+	e.hub.groupRcpt = ratelimit.NewWindow(10, time.Hour) // recarga desprezível durante o teste
+	a, b, c, d, f := e.user(), e.user(), e.user(), e.user(), e.user()
+	e.friends(a, b)
+	g := e.group(a, b, c, d, f)
+	ca := e.online(a)
+	for i := range 3 { // 10 - 3×(1 + 3 de dívida): a 3ª ainda passa, a 4ª não
+		ca.send(groupEnv(g, fmt.Sprintf("g%d", i), "x"))
+		if fr := ca.read(); fr.Type != wire.Ack {
+			t.Fatalf("grupo %d: %+v", i, fr)
+		}
+	}
+	ca.send(groupEnv(g, "demais", "x"))
+	ca.wantError("rate_limited")
+	ca.send(envelope(b, "m1", "x")) // o 1:1 não usa este limitador
+	if fr := ca.read(); fr.Type != wire.Ack {
+		t.Fatalf("1:1: %+v", fr)
+	}
+	if n := e.count(`SELECT count(*) FROM envelopes WHERE client_msg_id = 'demais'`); n != 0 {
+		t.Fatalf("gravou acima do limite: %d", n)
+	}
+	if groupRcptPerMin < 10*49 {
+		t.Fatalf("grupo de 50 não manda 10 por minuto: %d", groupRcptPerMin)
+	}
+}
+
+func TestGroupLimitCountsFull(t *testing.T) {
+	e := newEnv(t)
+	e.hub.groupRcpt = ratelimit.NewWindow(8, time.Hour)
+	a, x, y, z := e.user(), e.user(), e.user(), e.user()
+	g := e.group(a, x, y, z)
+	if _, err := e.pool.Exec(context.Background(), `INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload)
+		SELECT r, $3, 'old' || i, 'x' FROM unnest($1::uuid[]) r, generate_series(1, $2) i`,
+		[]string{x, y, z}, maxPendingPerRecipient, a); err != nil {
+		t.Fatal(err)
+	}
+	ca := e.online(a)
+	for i := range 3 { // nada gravado, mas cada uma custa os 3 membros: 8 - 3×3
+		ca.send(groupEnv(g, fmt.Sprintf("g%d", i), "x"))
+		if fr := ca.read(); fr.Type != wire.Ack {
+			t.Fatalf("grupo %d: %+v", i, fr)
+		}
+	}
+	ca.send(groupEnv(g, "demais", "x"))
+	ca.wantError("rate_limited")
+}
+
+func TestRecipientCap(t *testing.T) {
+	e := newEnv(t)
+	a, full, c := e.user(), e.user(), e.user()
+	e.friends(a, full)
+	g := e.group(a, full, c)
+	if _, err := e.pool.Exec(context.Background(), `INSERT INTO envelopes (recipient_id, sender_id, client_msg_id, payload)
+		SELECT $1, $2, 'old' || i, 'x' FROM generate_series(1, $3) i`, full, c, maxPendingPerRecipient-1); err != nil {
+		t.Fatal(err)
+	}
+	ca, cc := e.online(a), e.online(c)
+
+	ca.send(envelope(full, "m0", "x")) // a milésima
+	if fr := ca.read(); fr.Type != wire.Ack {
+		t.Fatalf("m0: %+v", fr)
+	}
+	ca.send(envelope(full, "m0", "x")) // reenvio do que já está gravado: Ack, não recipient_full
+	if fr := ca.read(); fr.Type != wire.Ack || string(fr.MsgID) != "m0" {
+		t.Fatalf("reenvio com a fila cheia: %+v", fr)
+	}
+	ca.send(envelope(full, "m1", "x"))
+	ca.wantError("recipient_full")
+	ca.send(groupEnv(g, "g1", "x"))
+	if fr := ca.read(); fr.Type != wire.Ack {
+		t.Fatalf("grupo: %+v", fr)
+	}
+	if fr := cc.read(); fr.Type != wire.GroupEnvelope {
+		t.Fatalf("membro com espaço: %+v", fr)
+	}
+	if n := e.count(`SELECT count(*) FROM envelopes WHERE recipient_id = $1`, full); n != maxPendingPerRecipient {
+		t.Fatalf("passou do teto: %d", n)
+	}
+
+	if _, err := e.pool.Exec(context.Background(), `DELETE FROM envelopes WHERE recipient_id = $1 AND client_msg_id = 'old1'`, full); err != nil {
+		t.Fatal(err)
+	}
+	ca.send(envelope(full, "m1", "x"))
+	if fr := ca.read(); fr.Type != wire.Ack {
+		t.Fatalf("depois de abrir vaga: %+v", fr)
 	}
 }
 
