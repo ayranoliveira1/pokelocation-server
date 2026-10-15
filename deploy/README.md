@@ -79,7 +79,34 @@ docker compose logs server | grep -v '"level":"INFO"'   # vazio = sem aviso nem 
 
 Atualizar: `git pull && docker compose up -d --build`. As migrações rodam na subida.
 
-## 5. Backup diário
+## 5. Deploy automático
+
+Um runner próprio do GitHub Actions na VPS roda `.github/workflows/deploy.yml` a cada push na `main`: `go vet`, os
+testes com `-race` (os containers de teste sobem no Docker da VPS), e só se passarem `git merge --ff-only` +
+`docker compose up -d --build` em `/opt/pokelocation-server` e o `/healthz`. Push em outra branch não roda nada.
+Runner próprio não gasta minutos do GitHub. O usuário do runner precisa estar no grupo `docker` e ter a deploy key.
+
+Token de registro (vale 1 h), gerado na máquina com o `gh`:
+
+```sh
+gh api -X POST repos/ayranoliveira1/pokelocation-server/actions/runners/registration-token --jq .token
+```
+
+Na VPS, com a versão e o SHA-256 do `actions-runner-linux-x64-<versão>.tar.gz` da página de releases de
+`actions/runner`:
+
+```sh
+sudo install -d -o $USER -g $USER /opt/pokelocation-runner && cd /opt/pokelocation-runner
+curl -fsSLo runner.tar.gz https://github.com/actions/runner/releases/download/v<versão>/actions-runner-linux-x64-<versão>.tar.gz
+echo "<sha256>  runner.tar.gz" | sha256sum -c && tar xzf runner.tar.gz && rm runner.tar.gz
+./config.sh --unattended --url https://github.com/ayranoliveira1/pokelocation-server --token <token> \
+  --name pokelocation --labels pokelocation --replace
+sudo ./svc.sh install $USER && sudo ./svc.sh start
+```
+
+Logs: Actions no GitHub, ou `journalctl -u 'actions.runner.*'` na VPS.
+
+## 6. Backup diário
 
 No console: bucket privado no Object Storage, com uma regra de lifecycle que apaga objetos com mais de 30 dias. A
 regra só roda com a política

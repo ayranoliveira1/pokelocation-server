@@ -1,0 +1,44 @@
+# Runner próprio na VPS (deploy/README.md): não gasta minutos do GitHub. Só push na main; teste falhou = sem deploy.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, pokelocation]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: go vet ./...
+
+      - run: go test -p 2 -race ./...
+
+      - name: limpa containers de teste parados
+        if: always()
+        run: docker ps -aq --filter label=org.testcontainers=true --filter status=exited --filter status=created | xargs -r docker rm -f
+
+      - name: deploy
+        working-directory: /opt/pokelocation-server
+        run: |
+          git fetch -q origin main
+          git merge -q --ff-only "$GITHUB_SHA"
+          docker compose up -d --build
+
+      - name: healthz
+        run: |
+          for i in $(seq 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8095/healthz && exit 0
+            sleep 2
+          done
+          cd /opt/pokelocation-server && docker compose ps
+          exit 1
