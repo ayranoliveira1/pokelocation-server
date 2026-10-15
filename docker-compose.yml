@@ -47,6 +47,7 @@ services:
     ports: ["80:80", "443:443"]
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/site:/srv/site:ro
       # .so.gz da libsignal: reserva do download do GitHub, gerados por tools/libsignal/prepare.sh no repo do app
       - ${LIBSIGNAL_DIR:-../pokelocation-social/tools/libsignal/out/0.86.5}:/srv/static/libsignal-0.86.5:ro
       - caddy:/data

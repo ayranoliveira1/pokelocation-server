@@ -1,0 +1,9 @@
+[Unit]
+Description=Backup do Postgres do pokelocation para o Object Storage
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+ExecStart=/home/ubuntu/pokelocation-server/deploy/backup.sh

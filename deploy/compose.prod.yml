@@ -1,0 +1,11 @@
+# Produção: COMPOSE_FILE=docker-compose.yml:deploy/compose.prod.yml no .env (deploy/README.md).
+services:
+  server:
+    environment:
+      FCM_CREDENTIALS: /run/secrets/fcm.json
+    volumes:
+      - type: bind
+        source: ${FCM_CREDENTIALS_FILE:?defina FCM_CREDENTIALS_FILE no .env}
+        target: /run/secrets/fcm.json
+        read_only: true
+        bind: {create_host_path: false} # arquivo ausente falha na subida em vez de virar diretório vazio

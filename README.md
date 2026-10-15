@@ -14,6 +14,8 @@ make run                      # Postgres e Redis no Docker, servidor local em :8
 docker compose up --build     # tudo no Docker, Caddy em :443
 ```
 
+Produção (VM da Oracle, backup, /privacy): [`deploy/README.md`](deploy/README.md).
+
 ### App no emulador (desenvolvimento local)
 
 HTTPS de verdade também no local: o Caddy usa `tls internal` com `SITE_ADDRESS=localhost` (padrão).
