@@ -51,7 +51,9 @@ const (
 	qDeleteEnvelopesPair = `DELETE FROM envelopes WHERE (recipient_id = $1 AND sender_id = $2)
 			OR (recipient_id = $2 AND sender_id = $1)`
 	qUnblock = `DELETE FROM blocks WHERE blocker_id = $1 AND blocked_id = $2`
-	qList    = `SELECT f.id, f.status, f.requester_id = $1, u.id, u.friend_code, f.created_at, u.username
+	qBlocks  = `SELECT u.id, u.username FROM blocks b JOIN users u ON u.id = b.blocked_id
+		WHERE b.blocker_id = $1 ORDER BY b.created_at DESC LIMIT $2`
+	qList = `SELECT f.id, f.status, f.requester_id = $1, u.id, u.friend_code, f.created_at, u.username
 		FROM friendships f
 		JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
 		WHERE f.requester_id = $1 OR f.addressee_id = $1
@@ -216,6 +218,20 @@ func (s *Store) block(ctx context.Context, me, other string) (friends bool, err 
 func (s *Store) unblock(ctx context.Context, me, other string) error {
 	_, err := s.pool.Exec(ctx, qUnblock, me, other)
 	return err
+}
+
+func (s *Store) blocks(ctx context.Context, me string) ([]Blocked, error) {
+	l := []Blocked{}
+	rows, err := s.pool.Query(ctx, qBlocks, me, blocksLimit)
+	if err != nil {
+		return l, err
+	}
+	var b Blocked
+	_, err = pgx.ForEachRow(rows, []any{&b.UserID, &b.Username}, func() error {
+		l = append(l, b)
+		return nil
+	})
+	return l, err
 }
 
 func (s *Store) list(ctx context.Context, me string) (List, error) {

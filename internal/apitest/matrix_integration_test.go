@@ -24,6 +24,7 @@ func TestRotasExigemToken(t *testing.T) {
 		{"POST", "/v1/friends/requests/" + nobody + "/accept"},
 		{"POST", "/v1/friends/requests/" + nobody + "/decline"},
 		{"DELETE", "/v1/friends/" + nobody},
+		{"GET", "/v1/blocks"},
 		{"POST", "/v1/blocks/" + nobody},
 		{"DELETE", "/v1/blocks/" + nobody},
 		{"PUT", "/v1/keys"},

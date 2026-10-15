@@ -78,6 +78,7 @@ func TestUsernameObrigatorio(t *testing.T) {
 	for _, r := range []struct{ m, p string }{
 		{"GET", "/v1/friends"},
 		{"POST", "/v1/friends/requests"},
+		{"GET", "/v1/blocks"},
 		{"POST", "/v1/blocks/" + nobody},
 		{"PUT", "/v1/keys"},
 		{"GET", "/v1/keys/count"},

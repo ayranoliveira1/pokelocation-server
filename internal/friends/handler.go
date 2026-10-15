@@ -29,6 +29,7 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	mux.Handle("POST /v1/friends/requests/{id}/accept", authed(httpx.Timed(h.reqWait, h.accept)))
 	mux.Handle("POST /v1/friends/requests/{id}/decline", authed(httpx.Timed(h.reqWait, h.decline)))
 	mux.Handle("DELETE /v1/friends/{userId}", authed(httpx.Timed(h.reqWait, h.remove)))
+	mux.Handle("GET /v1/blocks", authed(httpx.Timed(h.reqWait, h.blocks)))
 	mux.Handle("POST /v1/blocks/{userId}", authed(httpx.Timed(h.reqWait, h.block)))
 	mux.Handle("DELETE /v1/blocks/{userId}", authed(httpx.Timed(h.reqWait, h.unblock)))
 }
@@ -89,6 +90,15 @@ func (h *Handler) decline(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) remove(w http.ResponseWriter, r *http.Request) {
 	done(w, h.Service.Remove(r.Context(), httpx.User(r.Context()), r.PathValue("userId")))
+}
+
+func (h *Handler) blocks(w http.ResponseWriter, r *http.Request) {
+	l, err := h.Service.Blocks(r.Context(), httpx.User(r.Context()))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string][]Blocked{"blocks": l})
 }
 
 func (h *Handler) block(w http.ResponseWriter, r *http.Request) {

@@ -15,9 +15,10 @@ import (
 
 // Tetos por usuário (docs/api.md §3): mantêm GET /v1/friends abaixo de 64 KiB.
 const (
-	maxFriends = 500
-	maxPending = 50
-	listLimit  = maxFriends + 2*maxPending + 100 // LIMIT defensivo acima dos tetos
+	maxFriends  = 500
+	maxPending  = 50
+	listLimit   = maxFriends + 2*maxPending + 100 // LIMIT defensivo acima dos tetos
+	blocksLimit = 500                             // só os mais recentes; cabe nos 64 KiB do app
 )
 
 var (
@@ -34,6 +35,11 @@ type Friend struct {
 	UserID     string  `json:"user_id"`
 	FriendCode string  `json:"friend_code"`
 	Username   *string `json:"username"` // null em conta antiga, ainda sem @nome
+}
+
+type Blocked struct {
+	UserID   string  `json:"user_id"`
+	Username *string `json:"username"`
 }
 
 type Request struct {
@@ -152,6 +158,10 @@ func (s *Service) Unblock(ctx context.Context, me, other string) error {
 		return nil
 	}
 	return s.store.unblock(ctx, me, other)
+}
+
+func (s *Service) Blocks(ctx context.Context, me string) ([]Blocked, error) {
+	return s.store.blocks(ctx, me)
 }
 
 func (s *Service) List(ctx context.Context, me string) (List, error) { return s.store.list(ctx, me) }

@@ -517,3 +517,43 @@ func TestRequestByUsername(t *testing.T) {
 	}
 	e.want(c, "POST", "/v1/friends/requests", `{"username":"bob_1"}`, 429, "rate_limited")
 }
+
+func TestListBlocks(t *testing.T) {
+	e := newEnv(t)
+	a, b, c := e.user(), e.user(), e.user()
+	e.name(b, "bob")
+	blocks := func(u user) []any {
+		t.Helper()
+		l, ok := e.want(u, "GET", "/v1/blocks", "", 200, "")["blocks"].([]any)
+		if !ok {
+			t.Fatal("sem a lista blocks")
+		}
+		return l
+	}
+
+	if l := blocks(a); len(l) != 0 {
+		t.Fatalf("lista inicial: %v", l)
+	}
+	e.want(a, "POST", "/v1/blocks/"+b.id, "", 204, "")
+	e.want(a, "POST", "/v1/blocks/"+c.id, "", 204, "")
+	e.want(c, "POST", "/v1/blocks/"+a.id, "", 204, "")
+	l := blocks(a)
+	if len(l) == 2 && l[0].(map[string]any)["user_id"] != c.id {
+		t.Fatalf("mais recente não veio primeiro: %v", l)
+	}
+	got := map[string]any{}
+	for _, x := range l {
+		m := x.(map[string]any)
+		got[m["user_id"].(string)] = m["username"]
+	}
+	if len(got) != 2 || got[b.id] != "bob" || got[c.id] != nil {
+		t.Fatalf("bloqueados de a: %v", got)
+	}
+	if l := blocks(b); len(l) != 0 {
+		t.Fatalf("quem me bloqueou apareceu: %v", l)
+	}
+	e.want(a, "DELETE", "/v1/blocks/"+b.id, "", 204, "")
+	if l := blocks(a); len(l) != 1 || l[0].(map[string]any)["user_id"] != c.id {
+		t.Fatalf("depois de desbloquear: %v", l)
+	}
+}
