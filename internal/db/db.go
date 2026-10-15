@@ -129,23 +129,53 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) error {
 	return nil
 }
 
-var createConcurrently = regexp.MustCompile(`(?is)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(IF\s+NOT\s+EXISTS\s+)?([\w.]+)`)
+var createConcurrently = regexp.MustCompile(`(?is)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+IF\s+NOT\s+EXISTS\s+([\w.]+)`)
+
+var (
+	idempotentStmt = regexp.MustCompile(`(?is)^\s*(?:` +
+		`CREATE\s+(?:UNIQUE\s+)?\w+\s+(?:CONCURRENTLY\s+)?IF\s+NOT\s+EXISTS\s|` +
+		`CREATE\s+OR\s+REPLACE\s|` +
+		`DROP\s+\w+\s+(?:CONCURRENTLY\s+)?IF\s+EXISTS\s|` +
+		`(?:VACUUM|ANALYZE|REINDEX|SET|RESET)\b)`)
+	// Uma ação só (vírgula fora de parênteses seria outra ação, sem garantia de IF [NOT] EXISTS).
+	alterOneAction = regexp.MustCompile(`(?is)^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?[\w."]+\s+(?:` +
+		`ADD\s+(?:COLUMN\s+)?IF\s+NOT\s+EXISTS|DROP\s+(?:COLUMN\s+|CONSTRAINT\s+)?IF\s+EXISTS|VALIDATE\s+CONSTRAINT)\s[^,]*$`)
+	parens = regexp.MustCompile(`\([^()]*\)`)
+)
+
+// Sem transação, um comando que deu certo fica aplicado e se repete na próxima subida: só passa o que pode repetir.
+func idempotent(stmt string) bool {
+	if strings.Contains(strings.TrimSuffix(strings.TrimSpace(stmt), ";"), ";") { // o protocolo simples rodaria os dois
+		return false
+	}
+	if idempotentStmt.MatchString(stmt) {
+		return true
+	}
+	for s := ""; s != stmt; {
+		s, stmt = stmt, parens.ReplaceAllString(stmt, "")
+	}
+	return alterOneAction.MatchString(stmt)
+}
 
 // Um CONCURRENTLY que falha deixa o índice INVALID, e o IF NOT EXISTS o manteria assim para sempre.
 func applyNoTx(ctx context.Context, conn *pgx.Conn, sql string) error {
-	for _, stmt := range statements(sql) {
+	stmts := statements(sql)
+	for _, stmt := range stmts {
+		if !idempotent(stmt) {
+			return fmt.Errorf("migração sem transação aceita só comando idempotente (CREATE ... IF NOT EXISTS, "+
+				"DROP ... IF EXISTS, ADD COLUMN IF NOT EXISTS, CREATE OR REPLACE): %s", strings.TrimSpace(stmt))
+		}
+	}
+	for _, stmt := range stmts {
 		if m := createConcurrently.FindStringSubmatch(stmt); m != nil {
-			if m[1] == "" {
-				return fmt.Errorf("CREATE INDEX CONCURRENTLY sem IF NOT EXISTS: %s", m[2])
-			}
 			var invalid bool
 			err := conn.QueryRow(ctx, `SELECT NOT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)`,
-				m[2]).Scan(&invalid)
+				m[1]).Scan(&invalid)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return err
 			}
 			if invalid {
-				drop := `DROP INDEX CONCURRENTLY IF EXISTS ` + pgx.Identifier(strings.Split(m[2], ".")).Sanitize()
+				drop := `DROP INDEX CONCURRENTLY IF EXISTS ` + pgx.Identifier(strings.Split(m[1], ".")).Sanitize()
 				if _, err := conn.Exec(ctx, drop); err != nil { // #nosec G202 -- identificador escapado
 					return err
 				}

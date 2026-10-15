@@ -84,6 +84,13 @@ Atualizar: `git pull && docker compose up -d --build`. As migrações rodam na s
 Um runner próprio do GitHub Actions na VPS roda `.github/workflows/deploy.yml` a cada push na `main`. O job `teste`
 roda `go vet` e os testes com `-race` (os containers de teste sobem no Docker da VPS); o job `deploy` só começa se ele
 passar: `git merge --ff-only` + `docker compose up -d --build` em `/opt/pokelocation-server` e o `/healthz`. Push em outra branch não roda nada.
+
+Se a subida ou o `/healthz` (60 s) falhar, o job volta sozinho: `git reset --hard` no commit que estava em `/opt` antes
+do merge, `docker compose up -d --build` de novo e confere o `/healthz`. O job fica vermelho mesmo quando a volta dá
+certo; o log diz "de volta em <sha>". A volta não desfaz migração já aplicada: toda migração tem de funcionar com o
+binário anterior (só acrescentar). Migração `-- migrate:no-transaction` só aceita comandos idempotentes
+(`CREATE ... IF NOT EXISTS`, `DROP ... IF EXISTS`, `ADD COLUMN IF NOT EXISTS`, `CREATE OR REPLACE`, `SET`); qualquer
+outro derruba a subida com erro antes de rodar o primeiro comando.
 Runner próprio não gasta minutos do GitHub. O usuário do runner precisa estar no grupo `docker`, ter a deploy key e o `gcc` (o `-race` usa cgo).
 
 Token de registro (vale 1 h), gerado na máquina com o `gh`:

@@ -289,3 +289,70 @@ func TestStatements(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestIdempotent(t *testing.T) {
+	for _, c := range []struct {
+		sql string
+		ok  bool
+	}{
+		{"CREATE INDEX CONCURRENTLY IF NOT EXISTS a ON t (v);", true},
+		{"create unique index concurrently if not exists a on t (v, w);", true},
+		{"CREATE TABLE IF NOT EXISTS x (id int, v numeric(10,2));", true},
+		{"CREATE EXTENSION IF NOT EXISTS pg_trgm;", true},
+		{"CREATE OR REPLACE VIEW v AS SELECT 1;", true},
+		{"DROP INDEX CONCURRENTLY IF EXISTS a;", true},
+		{"DROP TABLE IF EXISTS a, b;", true},
+		{"ALTER TABLE t ADD COLUMN IF NOT EXISTS w numeric(10,2) NOT NULL DEFAULT 0;", true},
+		{"ALTER TABLE IF EXISTS ONLY public.t ADD IF NOT EXISTS w int;", true},
+		{"ALTER TABLE t DROP COLUMN IF EXISTS w;", true},
+		{"ALTER TABLE t DROP CONSTRAINT IF EXISTS c;", true},
+		{"ALTER TABLE t VALIDATE CONSTRAINT c;", true},
+		{"VACUUM ANALYZE t;", true},
+		{"SET lock_timeout = '5s';", true},
+		{"RESET lock_timeout;", true},
+		{"CREATE INDEX CONCURRENTLY a ON t (v);", false},
+		{"CREATE INDEX a ON t (v);", false},
+		{"CREATE TABLE x (id int);", false},
+		{"DROP TABLE a;", false},
+		{"ALTER TABLE t ADD COLUMN w int;", false},
+		{"ALTER TABLE t ADD COLUMN IF NOT EXISTS w int, ADD COLUMN z int;", false},
+		{"ALTER TABLE t RENAME COLUMN a TO b;", false},
+		{"ALTER TABLE t ADD CONSTRAINT c CHECK (v > 0) NOT VALID;", false},
+		{"INSERT INTO t VALUES (1);", false},
+		{"UPDATE t SET v = v + 1;", false},
+		{"ALTER TABLE t ADD COLUMN IF NOT EXISTS a int; ALTER TABLE t ADD COLUMN b int;", false},
+		{"CREATE TABLE IF NOT EXISTS x (id int); DROP TABLE y", false},
+	} {
+		if got := idempotent(c.sql); got != c.ok {
+			t.Errorf("idempotent(%q) = %v", c.sql, got)
+		}
+	}
+	files, _ := fs.Glob(migrations, "migrations/*.sql")
+	for _, f := range files {
+		b, _ := fs.ReadFile(migrations, f)
+		if !strings.HasPrefix(string(b), noTxMarker) {
+			continue
+		}
+		for _, s := range statements(string(b)) {
+			if !idempotent(s) {
+				t.Errorf("%s: %q", f, s)
+			}
+		}
+	}
+}
+
+// Recusa antes do primeiro comando: nada da migração fica aplicado pela metade.
+func TestNoTxRejectsBeforeRunning(t *testing.T) {
+	ctx := context.Background()
+	pool := openDB(t)
+	mfs := fstest.MapFS{
+		"migrations/0001_t.sql": tx(table),
+		"migrations/0002_i.sql": noTx("CREATE INDEX CONCURRENTLY IF NOT EXISTS t_v ON t (v);\nALTER TABLE t ADD COLUMN w int;\n"),
+	}
+	if err := migrate(ctx, pool, mfs); err == nil || !strings.Contains(err.Error(), "ADD COLUMN w") {
+		t.Fatalf("ADD COLUMN sem IF NOT EXISTS: %v", err)
+	}
+	if v, valid := version(t, pool), indexValid(t, pool, "t_v"); v != 1 || valid != -1 {
+		t.Fatalf("versão %d e índice %d; want 1 e sem índice", v, valid)
+	}
+}

@@ -36,15 +36,32 @@ jobs:
         working-directory: /opt/pokelocation-server
     steps:
       - name: atualiza e sobe
+        id: up
         run: |
+          echo "prev=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git fetch -q origin main
           git merge -q --ff-only "$GITHUB_SHA"
           docker compose up -d --build
 
       - name: healthz
         run: |
-          for i in $(seq 30); do
+          for _ in $(seq 30); do
             curl -fsS -o /dev/null http://127.0.0.1:8095/healthz && exit 0
+            sleep 2
+          done
+          docker compose ps
+          exit 1
+
+      # o /opt já está no commit novo: sem voltar o git, até um "docker compose up" manual subiria a versão quebrada
+      - name: volta ao commit anterior
+        if: (failure() || cancelled()) && steps.up.outputs.prev != ''
+        env:
+          PREV: ${{ steps.up.outputs.prev }}
+        run: |
+          git reset -q --hard "$PREV"
+          docker compose up -d --build
+          for _ in $(seq 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8095/healthz && echo "de volta em $PREV" && exit 0
             sleep 2
           done
           docker compose ps
