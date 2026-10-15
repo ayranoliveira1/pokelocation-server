@@ -4,7 +4,7 @@ Servidor da camada social do [PokeLocation](https://github.com/ayranoliveira1/po
 públicas do Signal, repasse de mensagens cifradas e posições dos amigos. O servidor nunca vê conteúdo nem posição:
 só repassa pacotes cifrados ponta a ponta.
 
-Go 1.27, um binário só (REST + WebSocket), PostgreSQL, Redis e Caddy (TLS). Contrato com o app: [`docs/api.md`](docs/api.md).
+Go 1.27, um binário só (REST + WebSocket), PostgreSQL, Redis e Caddy (TLS).
 
 ## Rodar
 

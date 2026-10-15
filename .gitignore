@@ -8,3 +8,4 @@ coverage.*
 testdata/fuzz/
 .maestri/
 .DS_Store
+docs/
