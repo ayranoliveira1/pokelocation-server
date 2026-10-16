@@ -73,3 +73,12 @@ func (s *syncBuf) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+func TestPprofLoopback(t *testing.T) {
+	for addr, want := range map[string]bool{"127.0.0.1:6060": true, "[::1]:6060": true, ":6060": false,
+		"0.0.0.0:6060": false, "10.0.0.5:6060": false, "localhost:6060": false, "127.0.0.1": false} {
+		if got := loopback(addr); got != want {
+			t.Errorf("%q: %v", addr, got)
+		}
+	}
+}

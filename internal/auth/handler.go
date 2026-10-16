@@ -33,6 +33,8 @@ type Config struct {
 }
 
 const (
+	pubPerMin  = 60
+	userPerMin = 300 // o sync inicial do app (amigos, grupos, envelopes, chaves de 49 membros) fica em ~100
 	maxBody    = 4 << 10
 	reqWait    = 5 * time.Second
 	googleWait = 15 * time.Second // o callback espera o endpoint de token do Google (até 10 s) e o banco
@@ -47,7 +49,12 @@ type Handler struct {
 
 	svc            *Service
 	ip, email, del *ratelimit.Limiter
-	reqWait        time.Duration // campo para o teste encurtar
+	// pub: refresh, logout e google/start por IP. Mais folgado que o ip (5/min): todo app renova a cada 15 min, e
+	// um CGNAT junta centenas de apps no mesmo IP.
+	pub *ratelimit.Limiter
+	// user: teto geral por usuário nas rotas autenticadas, por cima dos limites próprios de cada rota
+	user    *ratelimit.Limiter
+	reqWait time.Duration // campo para o teste encurtar
 }
 
 func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
@@ -65,7 +72,8 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		names: ratelimit.NewWindow(5, 24*time.Hour),
 	}
 	s.google = s.googleIdentity
-	h := &Handler{svc: s, ip: ratelimit.New(5), email: ratelimit.New(5), del: ratelimit.New(5), reqWait: reqWait}
+	h := &Handler{svc: s, ip: ratelimit.New(5), email: ratelimit.New(5), del: ratelimit.New(5),
+		pub: ratelimit.New(pubPerMin), user: ratelimit.New(userPerMin), reqWait: reqWait}
 	s.notify = h.notify
 	s.deleted = func(user string, ex []string) {
 		if h.OnDelete != nil {
@@ -133,6 +141,10 @@ func (h *Handler) authed(needName bool, next http.HandlerFunc) http.Handler {
 			h.fail(w, err)
 			return
 		}
+		if !h.user.Allow(uid, h.svc.now()) {
+			httpx.Error(w, http.StatusTooManyRequests, "rate_limited")
+			return
+		}
 		next(w, r.WithContext(httpx.WithUser(r.Context(), uid)))
 	})
 }
@@ -175,7 +187,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 	var in refreshBody
-	if !httpx.Decode(w, r, maxBody, &in) {
+	if !h.allowPub(w, r) || !httpx.Decode(w, r, maxBody, &in) {
 		return
 	}
 	t, err := h.svc.refresh(r.Context(), in.Token)
@@ -184,7 +196,7 @@ func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	var in refreshBody
-	if !httpx.Decode(w, r, maxBody, &in) {
+	if !h.allowPub(w, r) || !httpx.Decode(w, r, maxBody, &in) {
 		return
 	}
 	if err := h.svc.logout(r.Context(), in.Token); err != nil {
@@ -249,6 +261,9 @@ func (h *Handler) putUsername(w http.ResponseWriter, r *http.Request) {
 
 // googleStart/googleCallback respondem a um navegador: erro sem como voltar ao app é texto puro.
 func (h *Handler) googleStart(w http.ResponseWriter, r *http.Request) {
+	if !h.allowPub(w, r) {
+		return
+	}
 	if h.svc.cfg.GoogleClientID == "" {
 		http.Error(w, "google desligado", http.StatusServiceUnavailable)
 		return
@@ -400,8 +415,18 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, email string) bo
 	return false
 }
 
-// clientIP: o X-Forwarded-For é confiável porque o binário só é alcançável pelo Caddy, que descarta o de fora (o
-// RemoteAddr é o próprio Caddy). IPv6 conta por /64: um cliente costuma ter o /64 inteiro.
+// allowPub: antes de qualquer I/O. Recusado → já respondeu 429.
+func (h *Handler) allowPub(w http.ResponseWriter, r *http.Request) bool {
+	if h.pub.Allow(clientIP(r), h.svc.now()) {
+		return true
+	}
+	httpx.Error(w, http.StatusTooManyRequests, "rate_limited")
+	return false
+}
+
+// clientIP: o X-Forwarded-For é confiável porque o binário só é alcançável pelo proxy da frente (nginx em prod, Caddy
+// no dev), que sobrescreve o de fora (o RemoteAddr é o próprio proxy). IPv6 conta por /64: um cliente costuma ter o
+// /64 inteiro.
 func clientIP(r *http.Request) string {
 	var a netip.Addr
 	if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {

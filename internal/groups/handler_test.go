@@ -16,6 +16,7 @@ import (
 
 	"github.com/ayranoliveira1/pokelocation-server/internal/friends"
 	"github.com/ayranoliveira1/pokelocation-server/internal/httpx"
+	"github.com/ayranoliveira1/pokelocation-server/internal/ratelimit"
 	"github.com/ayranoliveira1/pokelocation-server/internal/testdb"
 )
 
@@ -40,6 +41,7 @@ func newEnv(t *testing.T) *env {
 	t.Parallel()
 	e := &env{t: t, pool: testdb.Pool(t)}
 	e.h = New(e.pool)
+	e.h.writes = ratelimit.New(1 << 20) // rajadas dos testes; TestWriteRateLimit põe o limite de verdade
 	e.h.OnChange = func(g string, us []string) {
 		us = slices.Clone(us)
 		slices.Sort(us)
@@ -535,5 +537,30 @@ func TestListSize(t *testing.T) {
 	e.mux.ServeHTTP(w, req)
 	if w.Code != 413 || !strings.Contains(w.Body.String(), `"too_large"`) {
 		t.Fatalf("acima do teto: %d %.100s", w.Code, w.Body)
+	}
+}
+
+// Criar, adicionar e remover somam 30/min por usuário, contando os erros; as leituras não entram.
+func TestWriteRateLimit(t *testing.T) {
+	e := newEnv(t)
+	e.h.writes = ratelimit.New(writesPerMin)
+	a, b := e.user(), e.user()
+	const g = "00000000-0000-4000-8000-000000000000"
+	paths := [][2]string{{"POST", "/v1/groups"}, {"POST", "/v1/groups/" + g + "/members"},
+		{"DELETE", "/v1/groups/" + g + "/members/" + b}}
+	for i := range writesPerMin {
+		p := paths[i%3]
+		if st, _ := e.do(a, p[0], p[1], "x"); st == 429 {
+			t.Fatalf("pedido %d: 429", i+1)
+		}
+	}
+	for _, p := range paths {
+		e.want(a, p[0], p[1], "x", 429, "rate_limited")
+	}
+	if st, _ := e.do(a, "GET", "/v1/groups", ""); st != 200 {
+		t.Fatalf("leitura: %d", st)
+	}
+	if st, _ := e.do(b, "POST", "/v1/groups", "x"); st == 429 {
+		t.Fatal("outro usuário foi limitado")
 	}
 }

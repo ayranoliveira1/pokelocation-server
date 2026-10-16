@@ -82,10 +82,15 @@ type fetched struct {
 type Handler struct {
 	store   *Store
 	fetches *ratelimit.Limiter // GET /v1/keys/{userId} por par: um amigo não esvazia as one-time do outro
+	// por quem pede, somando os alvos: abrir sessão com um grupo de 50 cabe, e um co-membro malicioso não drena
+	// as one-time de todos. Sem teto por alvo: o atacante bloquearia o fetch das chaves da vítima.
+	byMe    *ratelimit.Limiter
 	reqWait time.Duration
 }
 
-func New(pool *pgxpool.Pool) *Handler { return &Handler{NewStore(pool), ratelimit.New(10), reqWait} }
+func New(pool *pgxpool.Pool) *Handler {
+	return &Handler{NewStore(pool), ratelimit.New(10), ratelimit.New(60), reqWait}
+}
 
 func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
 	mux.Handle("PUT /v1/keys", authed(httpx.Timed(h.reqWait, h.put)))
@@ -125,7 +130,8 @@ func (h *Handler) fetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	me := httpx.User(r.Context())
-	if !h.fetches.Allow(me+" "+strings.ToLower(other), time.Now()) {
+	now := time.Now()
+	if !h.byMe.Allow(me, now) || !h.fetches.Allow(me+" "+strings.ToLower(other), now) {
 		httpx.Error(w, http.StatusTooManyRequests, "rate_limited")
 		return
 	}

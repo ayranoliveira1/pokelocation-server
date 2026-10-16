@@ -46,7 +46,7 @@ Instale `caddy-local-root.crt` só no emulador; só a build debug do app confia 
 | `POGO_UPSTREAM_URL` | `https://coordinates-api.pokemongopro.com` | só para teste local com um PoGo falso |
 | `LOG_REQUESTS` | vazio = desligado | `1` = log de cada requisição (método, rota sem query, status, ms), só para depurar no local |
 | `PPROF_ADDR` | vazio = desligado | endereço **interno** do pprof (ex.: `127.0.0.1:6060`) |
-| `CLUSTER` | vazio = uma instância | `1` = várias instâncias atrás do mesmo Redis (repasse do WS por pub/sub). Cada instância abre até 32 conexões no Postgres (`pool_max_conns` no `DATABASE_URL` muda): instâncias × pool < `max_connections` (100 por padrão) |
+| `CLUSTER` | vazio = uma instância | `1` = várias instâncias atrás do mesmo Redis (repasse do WS por pub/sub). Cada instância abre até 32 conexões no Postgres (`pool_max_conns` no `DATABASE_URL` muda): instâncias × pool < `max_connections` (100 por padrão). Os limites por IP e por conta (login, refresh, rotas autenticadas) são por instância: com `CLUSTER=1`, levar o do auth para o Redis antes |
 | `ADDR` | `:8080` | endereço HTTP interno |
 | `GOMEMLIMIT` | `1GiB` no compose | ~70% da RAM da máquina/container; abaixo do pico vivo (~37 KB por conexão) o GC roda sem parar. `GOGC` fica no padrão |
 

@@ -508,3 +508,22 @@ func TestFetchGroupMember(t *testing.T) {
 	e.exec(`DELETE FROM group_members WHERE user_id = $1`, b)
 	e.want(b, "GET", "/v1/keys/"+a, nil, 403, "forbidden")
 }
+
+// Por quem pede, somando os alvos: 60/min no total; outro usuário não sente.
+func TestFetchRateLimitTotal(t *testing.T) {
+	e := newEnv(t)
+	me, other := e.user(), e.user()
+	targets := make([]string, 7)
+	for i := range targets {
+		targets[i] = e.user()
+	}
+	for i := range 60 { // 10 por par: 6 alvos cheios
+		if st, _ := e.do(me, "GET", "/v1/keys/"+targets[i/10], nil); st == 429 {
+			t.Fatalf("pedido %d: 429", i+1)
+		}
+	}
+	e.want(me, "GET", "/v1/keys/"+targets[6], nil, 429, "rate_limited") // par novo, mas o total acabou
+	if st, _ := e.do(other, "GET", "/v1/keys/"+targets[6], nil); st == 429 {
+		t.Fatal("outro usuário foi limitado")
+	}
+}

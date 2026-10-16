@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ayranoliveira1/pokelocation-server/internal/httpx"
+	"github.com/ayranoliveira1/pokelocation-server/internal/ratelimit"
 )
 
 const reqWait = 5 * time.Second
@@ -17,16 +18,32 @@ const reqWait = 5 * time.Second
 type Handler struct {
 	*Service // embutido: expõe h.OnChange ao main
 	reqWait  time.Duration
+	writes   *ratelimit.Limiter // criar, adicionar e remover somados, por usuário
 }
 
-func New(pool *pgxpool.Pool) *Handler { return &Handler{NewService(NewStore(pool)), reqWait} }
+func New(pool *pgxpool.Pool) *Handler {
+	return &Handler{NewService(NewStore(pool)), reqWait, ratelimit.New(writesPerMin)}
+}
+
+const writesPerMin = 30
 
 func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.Handler) {
-	mux.Handle("POST /v1/groups", authed(httpx.Timed(h.reqWait, h.create)))
+	mux.Handle("POST /v1/groups", authed(httpx.Timed(h.reqWait, h.limited(h.create))))
 	mux.Handle("GET /v1/groups", authed(httpx.Timed(h.reqWait, h.list)))
 	mux.Handle("GET /v1/groups/{id}", authed(httpx.Timed(h.reqWait, h.get)))
-	mux.Handle("POST /v1/groups/{id}/members", authed(httpx.Timed(h.reqWait, h.add)))
-	mux.Handle("DELETE /v1/groups/{id}/members/{userId}", authed(httpx.Timed(h.reqWait, h.remove)))
+	mux.Handle("POST /v1/groups/{id}/members", authed(httpx.Timed(h.reqWait, h.limited(h.add))))
+	mux.Handle("DELETE /v1/groups/{id}/members/{userId}", authed(httpx.Timed(h.reqWait, h.limited(h.remove))))
+}
+
+// limited: antes do corpo, contando os erros também.
+func (h *Handler) limited(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !h.writes.Allow(httpx.User(r.Context()), time.Now()) {
+			httpx.Error(w, http.StatusTooManyRequests, "rate_limited")
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {

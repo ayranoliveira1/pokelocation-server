@@ -74,12 +74,17 @@ sudo certbot --nginx -d pokelocation.waveplay.xyz --redirect
 
 O certbot só edita o arquivo deste site e renova sozinho pelo timer que já existe.
 
+Ao trocar o `deploy/nginx.conf` (limites por IP, `/healthz`): copie de novo para `sites-available` e rode
+`sudo nginx -t && sudo systemctl reload nginx`. O `nginx -t` vem antes do reload, porque a VPS é compartilhada e um
+erro derrubaria os outros sites. As zonas `pokelocation_*` têm nome próprio e só os `location` deste site as usam.
+O certbot mantém os `location` ao acrescentar o bloco 443; confira o arquivo final em `sites-available`.
+
 ## 4. Subir e conferir
 
 ```sh
 cd /opt/pokelocation-server
 docker compose up -d --build
-curl -fsS https://pokelocation.waveplay.xyz/healthz
+curl -fsS http://127.0.0.1:8095/healthz        # pelo domínio o nginx responde 404
 curl -fsSI https://pokelocation.waveplay.xyz/privacy
 docker compose logs server | grep -v '"level":"INFO"'   # vazio = sem aviso nem erro
 ```

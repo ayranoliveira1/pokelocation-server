@@ -1026,3 +1026,54 @@ func TestAuthedNamed(t *testing.T) {
 		t.Fatalf("depois do @nome: %d", w.Code)
 	}
 }
+
+// refresh, logout e google/start: balde próprio de pubPerMin por IP, somando as três, fora do de login.
+func TestPublicRateLimit(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	t0 := time.Now()
+	e.h.svc.now = func() time.Time { return t0 }
+	e.addr = "203.0.113.9:1000"
+	for i := range pubPerMin {
+		var w *httptest.ResponseRecorder
+		switch i % 3 {
+		case 0:
+			w = e.post("/v1/auth/refresh", `{"refresh_token":"x"}`)
+		case 1:
+			w = e.post("/v1/auth/logout", `{"refresh_token":"x"}`)
+		default:
+			w = e.req("GET", "/v1/auth/google/start", "", "")
+		}
+		if w.Code == 429 {
+			t.Fatalf("pedido %d: 429", i+1)
+		}
+	}
+	wantErr(t, e.post("/v1/auth/refresh", `{"refresh_token":"x"}`), 429, "rate_limited")
+	wantErr(t, e.post("/v1/auth/logout", `{"refresh_token":"x"}`), 429, "rate_limited")
+	wantErr(t, e.req("GET", "/v1/auth/google/start", "", ""), 429, "rate_limited")
+	if w := e.post("/v1/auth/login", cred("x@ex.com", "x")); w.Code != 401 {
+		t.Fatalf("login no mesmo IP: %d", w.Code)
+	}
+	e.addr = "203.0.113.10:1000"
+	if w := e.post("/v1/auth/refresh", `{"refresh_token":"x"}`); w.Code != 401 {
+		t.Fatalf("outro IP: %d", w.Code)
+	}
+}
+
+// Teto geral por usuário nas rotas autenticadas; outro usuário não sente.
+func TestUserRateLimit(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a, b := e.register("teto-a@ex.com").Access, e.register("teto-b@ex.com").Access
+	t0 := time.Now()
+	e.h.svc.now = func() time.Time { return t0 }
+	for i := range userPerMin {
+		if w := e.req("GET", "/v1/me", "", a); w.Code != 200 {
+			t.Fatalf("pedido %d: %d", i+1, w.Code)
+		}
+	}
+	wantErr(t, e.req("GET", "/v1/me", "", a), 429, "rate_limited")
+	if w := e.req("GET", "/v1/me", "", b); w.Code != 200 {
+		t.Fatalf("outro usuário: %d", w.Code)
+	}
+}

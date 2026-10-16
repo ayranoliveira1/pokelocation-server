@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -68,7 +69,20 @@ func loadConfig() (config, error) {
 			return c, errors.New(name + " obrigatória")
 		}
 	}
+	if c.pprofAddr != "" && !loopback(c.pprofAddr) {
+		return c, errors.New("PPROF_ADDR só em loopback (127.0.0.1:porta ou [::1]:porta)")
+	}
 	return c, nil
+}
+
+// loopback: host vazio (":6060") escutaria em todas as interfaces.
+func loopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 func main() {

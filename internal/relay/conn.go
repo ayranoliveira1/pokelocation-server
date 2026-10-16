@@ -497,7 +497,10 @@ func (c *Conn) handle(msg []byte) {
 	case f.Type == wire.Envelope:
 		c.envelope(f)
 	case f.Type == wire.Ack:
-		c.ack(f)
+		// excedeu: descarta sem frame de erro (não amplifica); o envelope volta no backlog e o app deduplica
+		if c.hub.acks.Allow(c.user, time.Now()) {
+			c.ack(f)
+		}
 	case f.Type == wire.GroupEnvelope && f.Peer == nil:
 		c.groupEnvelope(f)
 	case f.Type == wire.Location || f.Type == wire.LocationOff && f.Peer == nil:
