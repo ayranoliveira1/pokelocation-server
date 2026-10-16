@@ -1,10 +1,33 @@
 # pokelocation-server
 
 Servidor da camada social do [PokeLocation](https://github.com/ayranoliveira1/pokelocation): contas, amigos, chaves
-públicas do Signal, repasse de mensagens cifradas e posições dos amigos. O servidor nunca vê conteúdo nem posição:
-só repassa pacotes cifrados ponta a ponta.
+públicas do Signal, repasse de mensagens cifradas, posições dos amigos e o proxy do PoGo Coordinates. O servidor nunca
+vê conteúdo nem posição: só repassa pacotes cifrados ponta a ponta.
 
-Go 1.27, um binário só (REST + WebSocket), PostgreSQL, Redis e Caddy (TLS).
+Go 1.27, um binário só (REST + WebSocket), PostgreSQL e Redis. TLS pelo Caddy no local e pelo nginx em produção.
+
+## Versões
+
+### v1.1: proxy do PoGo Coordinates (para o app v1.2)
+
+- **Proxy do PoGo Coordinates** (`/v1/pogo/*`): login, lookup, search, reveal e treinador. O token do PoGo do usuário
+  fica guardado cifrado.
+- **Tokens do servidor em rodízio:** lookup, search, reveal e alertas sem shiny funcionam sem o usuário vincular
+  conta. Token recusado sai do rodízio por 5 min.
+- **Alertas por push** com foto, forma e costume do Pokémon; shiny só com treinador vinculado.
+- **PoGo lento:** espera até 30 s em lookup e search, depois responde `504 upstream_timeout`.
+- **Limites** por IP no nginx (login mais apertado) e por usuário nas rotas autenticadas.
+
+O app v1.1 continua funcionando igual com este servidor.
+
+### v1.0: camada social
+
+Contas por e-mail e senha ou Google (PKCE), com @nome único; amigos com pedidos, bloquear e desbloquear; chaves
+públicas do Signal; repasse de mensagens 1:1 e de grupo com fila para quem está offline (até 1000 por destinatário);
+grupos; posição dos amigos guardada cifrada por 60 s; push pelo FCM; excluir a conta; página `/privacy`; deploy
+automático na `main` que volta ao commit anterior se a subida falhar.
+
+Cada versão tem a sua branch `release/vX.Y` e o seu [release](https://github.com/ayranoliveira1/pokelocation-server/releases).
 
 ## Rodar
 
@@ -14,7 +37,7 @@ make run                      # Postgres e Redis no Docker, servidor local em :8
 docker compose up --build     # tudo no Docker, Caddy em :443
 ```
 
-Produção (VM da Oracle, backup, /privacy): [`deploy/README.md`](deploy/README.md).
+Produção (nginx, deploy automático, /privacy): [`deploy/README.md`](deploy/README.md).
 
 ### App no emulador (desenvolvimento local)
 
@@ -77,4 +100,4 @@ Teste que sobe container roda **só** por `tools/gtest.sh <args do go test>`: tr
 
 ## Licença
 
-MIT. O app é AGPL-3.0 por causa da libsignal; o servidor não usa a libsignal.
+MIT.
