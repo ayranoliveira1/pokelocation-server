@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
@@ -26,6 +27,7 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/groups"
 	"github.com/ayranoliveira1/pokelocation-server/internal/keys"
 	"github.com/ayranoliveira1/pokelocation-server/internal/location"
+	"github.com/ayranoliveira1/pokelocation-server/internal/pogo"
 	"github.com/ayranoliveira1/pokelocation-server/internal/push"
 	"github.com/ayranoliveira1/pokelocation-server/internal/relay"
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
@@ -38,6 +40,7 @@ type config struct {
 	fcmCredentials              string
 	cluster                     bool
 	auth                        auth.Config
+	pogo                        pogo.Config
 }
 
 func loadConfig() (config, error) {
@@ -55,6 +58,9 @@ func loadConfig() (config, error) {
 			GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 			PublicURL:          os.Getenv("PUBLIC_URL"),
 		},
+		pogo: pogo.Config{TokenKey: os.Getenv("POGO_TOKEN_KEY"), Upstream: os.Getenv("POGO_UPSTREAM_URL"),
+			Workers: os.Getenv("POGO_WORKERS"), AlertInterval: os.Getenv("POGO_ALERT_INTERVAL"),
+			SharedTokens: os.Getenv("POGO_SHARED_TOKENS")},
 	}
 	if c.addr == "" {
 		c.addr = ":8080"
@@ -64,7 +70,20 @@ func loadConfig() (config, error) {
 			return c, errors.New(name + " obrigatória")
 		}
 	}
+	if c.pprofAddr != "" && !loopback(c.pprofAddr) {
+		return c, errors.New("PPROF_ADDR só em loopback (127.0.0.1:porta ou [::1]:porta)")
+	}
 	return c, nil
+}
+
+// loopback: host vazio (":6060") escutaria em todas as interfaces.
+func loopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 func main() {
@@ -127,9 +146,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	pogoH, err := pogo.New(cfg.pogo, pool, rdb)
+	if err != nil {
+		return err
+	}
 	pushSvc := push.New(pool, sender)
+	pushSvc.DataWorkers = pogoH.Workers() / 2 // cada SendEach leva ~100 ms, bem abaixo dos segundos de cada regra no PoGo
 	hub.Notify = pushSvc.Notify
 	go pushSvc.Run(ctx)
+	go pogoH.Run(ctx, pushSvc)
 
 	go daily(ctx, "auth: limpeza dos refresh", authH.Cleanup)
 	go daily(ctx, "relay: envelopes > 30 dias", hub.Cleanup)
@@ -144,7 +169,10 @@ func run() error {
 	hub.Routes(mux, named)
 	loc.Routes(mux, named)
 	gh.Routes(mux, named)
-	push.NewHandler(pool).Routes(mux, named)
+	pushH := push.NewHandler(pool)
+	pushH.OnToken = pogoH.Enqueue
+	pushH.Routes(mux, named)
+	pogoH.Routes(mux, authH.Authed)
 
 	srv := &http.Server{
 		Addr:              cfg.addr,

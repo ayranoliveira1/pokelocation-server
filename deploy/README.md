@@ -50,8 +50,23 @@ FCM_CREDENTIALS_FILE=/home/<usuário>/pokelocation-secrets/fcm-service-account.j
 GOMEMLIMIT=2GiB
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
+POGO_TOKEN_KEY=<openssl rand -base64 32>
+POGO_WORKERS=32
+POGO_ALERT_INTERVAL=3m
+POGO_SHARED_TOKENS=
 BACKUP_PAR_URL=
 ```
+
+`POGO_WORKERS` (1–64) é quantos usuários com alerta do PoGo cada instância atende ao mesmo tempo, e
+`POGO_ALERT_INTERVAL` (2m–10m) de quanto em quanto tempo cada um roda. Capacidade ≈ workers × intervalo / latência do
+PoGo, por regra: o PoGo leva 5–15 s por chamada (~7 s típico), então 32 com 3 min ≈ 850 usuários com 1 alerta
+(≈85 com 10 regras; ≈380 se o PoGo ficar em 15 s), e 64 ≈ 1.650. Com o log `pogo: fila atrasada` aparecendo, aumente
+os workers (mais pressão no PoGo) ou o intervalo (alerta mais tardio) no `.env` e recrie só o servidor, sem deploy de
+código: `docker compose up -d server`.
+
+`POGO_SHARED_TOKENS` (opcional, separados por vírgula): tokens do PoGo do servidor, usados em rodízio no lookup, search,
+reveal e nos alertas sem shiny, sem exigir vínculo do usuário. O log `pogo: token do servidor recusado` com `pos` (a
+posição na lista, a partir de 0) indica um token a trocar.
 
 Os `.so.gz` da libsignal são reserva do download do GitHub: copie `tools/libsignal/out/0.86.5` do repo do app para
 `/opt/pokelocation-static/libsignal-0.86.5/`.
@@ -67,12 +82,17 @@ sudo certbot --nginx -d pokelocation.waveplay.xyz --redirect
 
 O certbot só edita o arquivo deste site e renova sozinho pelo timer que já existe.
 
+Ao trocar o `deploy/nginx.conf` (limites por IP, `/healthz`): copie de novo para `sites-available` e rode
+`sudo nginx -t && sudo systemctl reload nginx`. O `nginx -t` vem antes do reload, porque a VPS é compartilhada e um
+erro derrubaria os outros sites. As zonas `pokelocation_*` têm nome próprio e só os `location` deste site as usam.
+O certbot mantém os `location` ao acrescentar o bloco 443; confira o arquivo final em `sites-available`.
+
 ## 4. Subir e conferir
 
 ```sh
 cd /opt/pokelocation-server
 docker compose up -d --build
-curl -fsS https://pokelocation.waveplay.xyz/healthz
+curl -fsS http://127.0.0.1:8095/healthz        # pelo domínio o nginx responde 404
 curl -fsSI https://pokelocation.waveplay.xyz/privacy
 docker compose logs server | grep -v '"level":"INFO"'   # vazio = sem aviso nem erro
 ```

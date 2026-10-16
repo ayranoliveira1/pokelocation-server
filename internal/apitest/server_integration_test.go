@@ -71,8 +71,8 @@ func start(t testing.TB) *server {
 	return startWith(t, fmt.Sprintf("redis://%s/%d", rdb.Options().Addr, rdb.Options().DB))
 }
 
-// startWith: como start, com outro Redis e sem marcar paralelo.
-func startWith(t testing.TB, redisURL string) *server {
+// startWith: como start, com outro Redis e sem marcar paralelo; env = variáveis a mais para o servidor.
+func startWith(t testing.TB, redisURL string, env ...string) *server {
 	t.Helper()
 	pool := testdb.Pool(t)
 	buildOnce.Do(func() {
@@ -104,6 +104,7 @@ func startWith(t testing.TB, redisURL string) *server {
 		"REDIS_URL="+redisURL,
 		envJWTKey+"="+base64.StdEncoding.EncodeToString(key.Seed()),
 	)
+	cmd.Env = append(cmd.Env, env...)
 	cmd.Stdout, cmd.Stderr = s.logs, s.logs
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

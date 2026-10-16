@@ -92,6 +92,7 @@ type sent struct{ user, token string }
 type fakeSender struct {
 	mu   sync.Mutex
 	got  []sent
+	data []Data
 	fail func(token string) error
 }
 
@@ -103,6 +104,13 @@ func (f *fakeSender) Send(_ context.Context, user, token string) error {
 		return f.fail(token)
 	}
 	return nil
+}
+
+func (f *fakeSender) SendData(ctx context.Context, user, token string, msgs []Data) error {
+	f.mu.Lock()
+	f.data = append(f.data, msgs...)
+	f.mu.Unlock()
+	return f.Send(ctx, user, token)
 }
 
 func (f *fakeSender) wait(t *testing.T, n int) []sent {
@@ -275,3 +283,49 @@ func TestNotifyThroughput(t *testing.T) {
 type senderFunc func(ctx context.Context, user, token string) error
 
 func (f senderFunc) Send(ctx context.Context, user, token string) error { return f(ctx, user, token) }
+func (f senderFunc) SendData(ctx context.Context, user, token string, _ []Data) error {
+	return f(ctx, user, token)
+}
+
+func TestTryPush(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	fs := &fakeSender{fail: func(tok string) error {
+		if tok == "morto" {
+			return ErrInvalidToken
+		}
+		return nil
+	}}
+	s := New(pool, fs)
+	h := NewHandler(pool)
+	ok, dead := newUser(t, pool, true), newUser(t, pool, true)
+	put(h, ok, `{"token":"tok-ok"}`)
+	put(h, dead, `{"token":"morto"}`)
+	msgs := []Data{{Fields: map[string]string{"t": "p"}, Collapse: "p:1", TTL: time.Minute}, {Fields: map[string]string{"t": "p"}}}
+	for range maxData / len(msgs) { // o teto é em mensagens, não em envios
+		if !s.TryPush(ok, "tok-ok", msgs) {
+			t.Fatal("recusou antes do teto")
+		}
+	}
+	if s.TryPush(ok, "tok-ok", msgs[:1]) {
+		t.Fatal("passou do teto")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+	fs.wait(t, maxData/len(msgs))
+	if !s.TryPush(dead, "morto", msgs) {
+		t.Fatal("fila não esvaziou")
+	}
+	for deadline := time.Now().Add(5 * time.Second); token(t, pool, dead) != nil; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("token inválido não foi apagado")
+		}
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.got[0] != (sent{ok, "tok-ok"}) || len(fs.data) != maxData+2 || fs.data[0].Collapse != "p:1" ||
+		token(t, pool, ok) == nil {
+		t.Fatalf("envios: %d %d", len(fs.got), len(fs.data))
+	}
+}

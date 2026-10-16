@@ -61,6 +61,7 @@ func newEnvPool(t *testing.T, pool *pgxpool.Pool) *env {
 	e.hub.authWait = 300 * time.Millisecond
 	e.hub.chat = ratelimit.New(1 << 20) // rajadas dos testes; TestChatRateLimit põe o limite de verdade
 	e.hub.groupRcpt = ratelimit.New(1 << 20)
+	e.hub.acks = ratelimit.New(1 << 20)
 	mux := http.NewServeMux()
 	e.hub.Routes(mux, func(h http.HandlerFunc) http.Handler { // X-User no lugar do Bearer
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1065,4 +1066,36 @@ func TestUsernameRequired(t *testing.T) {
 	c.wantError("username_required")
 	c.wantClose(websocket.ClosePolicyViolation)
 	e.waitOnline(a, 0)
+}
+
+// Ack acima do limite cai em silêncio: sem frame de erro, e o envelope segue na fila; outro usuário não sente.
+func TestAckRateLimit(t *testing.T) {
+	e := newEnv(t)
+	e.hub.acks = ratelimit.New(3) // o de verdade é ackPerMin; 3 basta para ver o corte
+	a, b, c := e.user(), e.user(), e.user()
+	e.friends(a, b)
+	e.friends(a, c)
+	ca, cb, cc := e.online(a), e.online(b), e.online(c)
+	for i := range 4 {
+		ca.send(envelope(b, fmt.Sprintf("m%d", i), "x"))
+		ca.read()
+		cb.read()
+	}
+	ca.send(envelope(c, "c0", "x"))
+	ca.read()
+	cc.read()
+	for i := range 4 {
+		cb.send(wire.AppendAck(nil, []byte(a), []byte(fmt.Sprintf("m%d", i))))
+	}
+	cc.send(wire.AppendAck(nil, []byte(a), []byte("c0")))
+	cb.quiet(300 * time.Millisecond) // nenhum Error
+	left := func() int { return e.count(`SELECT count(*) FROM envelopes`) }
+	for deadline := time.Now().Add(5 * time.Second); left() != 1; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("envelopes na fila: %d, quero só o m3", left())
+		}
+	}
+	if n := e.count(`SELECT count(*) FROM envelopes WHERE client_msg_id = 'm3'`); n != 1 {
+		t.Fatal("o Ack descartado apagou o envelope")
+	}
 }

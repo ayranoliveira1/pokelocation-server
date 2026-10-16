@@ -33,6 +33,19 @@ func TestRotasExigemToken(t *testing.T) {
 		{"GET", "/v1/envelopes"},
 		{"POST", "/v1/envelopes/ack"},
 		{"GET", "/v1/locations"},
+		{"POST", "/v1/pogo/login"},
+		{"DELETE", "/v1/pogo/login"},
+		{"GET", "/v1/pogo/me"},
+		{"POST", "/v1/pogo/lookup"},
+		{"POST", "/v1/pogo/search"},
+		{"GET", "/v1/pogo/reveal/abc"},
+		{"GET", "/v1/pogo/trainer"},
+		{"POST", "/v1/pogo/trainer/lookup"},
+		{"POST", "/v1/pogo/trainer/confirm"},
+		{"GET", "/v1/pogo/rules"},
+		{"POST", "/v1/pogo/rules"},
+		{"PUT", "/v1/pogo/rules/" + nobody},
+		{"DELETE", "/v1/pogo/rules/" + nobody},
 	} {
 		t.Run(r.m+" "+r.p, func(t *testing.T) {
 			s := s.on(t)
