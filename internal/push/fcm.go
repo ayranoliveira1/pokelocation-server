@@ -43,7 +43,7 @@ func (f fcmSender) SendData(ctx context.Context, _, token string, msgs []Data) e
 	for i, d := range msgs {
 		ttl := d.TTL
 		ms[i] = &messaging.Message{Token: token, Data: d.Fields,
-			Android: &messaging.AndroidConfig{Priority: "high", CollapseKey: d.Collapse, TTL: &ttl}}
+			Android: &messaging.AndroidConfig{Priority: "high", TTL: &ttl}}
 	}
 	br, err := f.c.SendEach(ctx, ms)
 	if err != nil {

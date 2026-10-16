@@ -34,9 +34,8 @@ type Sender interface {
 
 // Data: aviso com conteúdo, que não é segredo (o do chat não leva nada).
 type Data struct {
-	Fields   map[string]string
-	Collapse string
-	TTL      time.Duration // depois disso o FCM descarta em vez de entregar atrasado
+	Fields map[string]string
+	TTL    time.Duration // depois disso o FCM descarta em vez de entregar atrasado
 }
 
 type Service struct {

@@ -301,7 +301,7 @@ func TestTryPush(t *testing.T) {
 	ok, dead := newUser(t, pool, true), newUser(t, pool, true)
 	put(h, ok, `{"token":"tok-ok"}`)
 	put(h, dead, `{"token":"morto"}`)
-	msgs := []Data{{Fields: map[string]string{"t": "p"}, Collapse: "p:1", TTL: time.Minute}, {Fields: map[string]string{"t": "p"}}}
+	msgs := []Data{{Fields: map[string]string{"t": "p"}, TTL: time.Minute}, {Fields: map[string]string{"t": "p"}}}
 	for range maxData / len(msgs) { // o teto é em mensagens, não em envios
 		if !s.TryPush(ok, "tok-ok", msgs) {
 			t.Fatal("recusou antes do teto")
@@ -324,7 +324,7 @@ func TestTryPush(t *testing.T) {
 	}
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	if fs.got[0] != (sent{ok, "tok-ok"}) || len(fs.data) != maxData+2 || fs.data[0].Collapse != "p:1" ||
+	if fs.got[0] != (sent{ok, "tok-ok"}) || len(fs.data) != maxData+2 || fs.data[0].TTL != time.Minute ||
 		token(t, pool, ok) == nil {
 		t.Fatalf("envios: %d %d", len(fs.got), len(fs.data))
 	}

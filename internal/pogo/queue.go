@@ -56,7 +56,7 @@ return 1`)
 //
 // KEYS: lease, seen. ARGV: token, limite por regra, agora ms, TTL da chave ms, e um texto por regra com pares
 // "encounter ttl_ms" separados por espaço. Marca até o limite de cada regra e devolve as posições (1..) marcadas; nil
-// se o lease já não é deste worker.
+// se o lease já não é deste worker. O já visto só estende, fora do limite: avisa uma vez enquanto continuar listado.
 var seenScript = redis.NewScript(`
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return false end
 local limit, now = tonumber(ARGV[2]), tonumber(ARGV[3])
@@ -66,14 +66,16 @@ for g = 5, #ARGV do
 	local got = 0
 	for id, ttl in string.gmatch(ARGV[g], '(%S+) (%d+)') do
 		pos = pos + 1
-		if got < limit and not redis.call('ZSCORE', KEYS[2], id) then
+		if redis.call('ZSCORE', KEYS[2], id) then
+			redis.call('ZADD', KEYS[2], 'GT', now + tonumber(ttl), id)
+		elseif got < limit then
 			redis.call('ZADD', KEYS[2], now + tonumber(ttl), id)
 			got = got + 1
 			out[#out + 1] = pos
 		end
 	end
 end
-if #out > 0 then redis.call('PEXPIRE', KEYS[2], ARGV[4]) end
+redis.call('PEXPIRE', KEYS[2], ARGV[4])
 return out`)
 
 func seenKey(user string) string { return "pogo:seen:" + user }
