@@ -374,18 +374,51 @@ func (r *dueRule) body() ([]byte, error) {
 
 const kmPerDeg = 111.32
 
-// flexID: o encounter_id vem como string no /search; no mapa pode vir número.
+// flexID: texto ou número do upstream, como texto (encounter_id, form, costume variam entre o /search e o mapa).
 type flexID string
 
 func (f *flexID) UnmarshalJSON(b []byte) error {
-	if string(b) != "null" {
-		*f = flexID(strings.Trim(string(b), `"`))
+	switch {
+	case string(b) == "null":
+	case len(b) >= 2 && b[0] == '"' && !bytes.ContainsRune(b, '\\'):
+		*f = flexID(b[1 : len(b)-1])
+	case b[0] == '"': // com escape: raro, decodifica de verdade
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*f = flexID(s)
+	default:
+		*f = flexID(b)
 	}
+	return nil
+}
+
+// flexInt: inteiro tolerante (147, "147", 147.0); qualquer outra coisa vira 0, sem derrubar o Unmarshal do lote.
+type flexInt int
+
+func (n *flexInt) UnmarshalJSON(b []byte) error {
+	v := 0
+	for _, c := range bytes.Trim(b, `"`) {
+		if c == '.' {
+			break
+		}
+		if c < '0' || c > '9' {
+			return nil
+		}
+		if v = v*10 + int(c-'0'); v > 1e6 { // id absurdo do upstream: sem overflow, vira 0
+			return nil
+		}
+	}
+	*n = flexInt(v)
 	return nil
 }
 
 type mon struct {
 	Encounter flexID   `json:"encounter_id"`
+	PokemonID flexInt  `json:"pokemon_id"` // dex
+	Form      flexID   `json:"form"`
+	Costume   flexID   `json:"costume"`
 	Reveal    string   `json:"reveal_code"`
 	Name      string   `json:"pokemon_name"`
 	CP        *float64 `json:"cp"`
@@ -448,8 +481,9 @@ func seenTTL(despawn, now time.Time) time.Duration {
 }
 
 func (w *worker) data(r *dueRule, m *mon, now time.Time) push.Data {
-	f := map[string]string{"t": "p", "n": m.Name, "iv": num(m.IV), "cp": num(m.CP), "d": "", "r": r.Name,
-		"rc": m.Reveal, "e": string(m.Encounter)}
+	f := make(map[string]string, 13) // todas as chaves: sem crescer o map no meio
+	f["t"], f["n"], f["iv"], f["cp"], f["d"] = "p", m.Name, num(m.IV), num(m.CP), ""
+	f["r"], f["rc"], f["e"] = r.Name, m.Reveal, string(m.Encounter)
 	ttl := unknownTTL
 	if !m.despawn.IsZero() {
 		f["d"] = strconv.FormatInt(m.despawn.UnixMilli(), 10)
@@ -457,6 +491,16 @@ func (w *worker) data(r *dueRule, m *mon, now time.Time) push.Data {
 	}
 	if m.Shiny {
 		f["s"] = "1"
+	}
+	// para o app achar a foto; ausentes quando o upstream não manda
+	if m.PokemonID > 0 {
+		f["id"] = strconv.Itoa(int(m.PokemonID))
+	}
+	if m.Form != "" {
+		f["f"] = string(m.Form)
+	}
+	if m.Costume != "" {
+		f["c"] = string(m.Costume)
 	}
 	return push.Data{Fields: f, Collapse: "p:" + r.ID, TTL: ttl}
 }

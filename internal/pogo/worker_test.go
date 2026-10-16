@@ -125,6 +125,7 @@ func TestWorker(t *testing.T) {
 	var near []string
 	for i := 1; i <= 8; i++ {
 		near = append(near, fmt.Sprintf(`{"encounter_id":"n%d","reveal_code":"rc%d","pokemon_name":"Dratini","cp":512,
+			"pokemon_id":147,"form":"Alola","costume":12,
 			"iv_percent":100,"despawn_at_ms":%d,"apx_lat":%f,"apx_long":0}`, i, i, despawn.UnixMilli(), 0.001*float64(i)))
 	}
 	near = append(near,
@@ -133,7 +134,8 @@ func TestWorker(t *testing.T) {
 		`{"encounter_id":"sem","apx_lat":0,"apx_long":0}`)
 	lookupBody := `{"mode":"pokemon","results":[` + strings.Join(near, ",") + `]}`
 	searchBody := `{"results":[{"encounter_id":"n1","reveal_code":"rc1","pokemon_name":"Dratini"},
-		{"encounter_id":"w1","reveal_code":"rcw","pokemon_name":"Gible","cp":900.5,"iv_percent":97.8,
+		{"encounter_id":"w1","reveal_code":"rcw","pokemon_name":"Gible","pokemon_id":443,"form":null,"costume":null,
+		"cp":900.5,"iv_percent":97.8,
 		"despawn_at":"` + despawn.UTC().Format(time.RFC3339) + `","shiny":true}],"tier":"logged_in","cap":10}`
 
 	var mu sync.Mutex
@@ -214,11 +216,14 @@ func TestWorker(t *testing.T) {
 	}
 	first := pa.msgs[0]
 	want := map[string]string{"t": "p", "n": "Dratini", "iv": "100", "cp": "512", "d": fmt.Sprint(despawn.UnixMilli()),
-		"r": "Perto", "rc": "rc1", "e": "n1"}
+		"r": "Perto", "rc": "rc1", "e": "n1", "id": "147", "f": "Alola", "c": "12"}
 	if fmt.Sprint(first.Fields) != fmt.Sprint(want) || first.Collapse != "p:"+r1 || first.TTL != despawn.Sub(start) {
 		t.Fatalf("aviso: %+v", first)
 	}
 	gible := pa.msgs[5]
+	if _, f := gible.Fields["f"]; f || gible.Fields["id"] != "443" {
+		t.Fatalf("forma null virou campo: %v", gible.Fields)
+	}
 	if gible.Fields["e"] != "w1" || gible.Fields["s"] != "1" || gible.Fields["cp"] != "900.5" ||
 		gible.Fields["iv"] != "97.8" || gible.Fields["r"] != "Mundo" || gible.Collapse != "p:"+r2 {
 		t.Fatalf("mundo: %+v", gible)
@@ -469,15 +474,42 @@ func TestMatchesReuse(t *testing.T) {
 	w, sc := &worker{}, &scratch{}
 	r := &dueRule{Scope: "world"}
 	now := time.Now()
-	w.matches(r, []byte(`{"results":[{"encounter_id":"a","reveal_code":"r","shiny":true,"cp":10,"despawn_at_ms":1}]}`),
-		time.UnixMilli(0), sc)
+	w.matches(r, []byte(`{"results":[{"encounter_id":"a","reveal_code":"r","shiny":true,"cp":10,"despawn_at_ms":1,
+		"pokemon_id":25,"form":"Alola","costume":3}]}`), time.UnixMilli(0), sc)
 	sc.cands = sc.cands[:0]
 	w.matches(r, []byte(`{"results":[{"encounter_id":"b","reveal_code":"r"}]}`), now, sc)
 	if len(sc.cands) != 1 || sc.cands[0].Shiny || sc.cands[0].CP != nil || sc.cands[0].DespawnMs != 0 {
 		t.Fatalf("vazou: %+v", sc.cands)
 	}
-	if d := w.data(r, &sc.cands[0], now); d.Fields["s"] != "" || d.Fields["cp"] != "" {
+	d := w.data(r, &sc.cands[0], now)
+	for _, k := range []string{"s", "id", "f", "c"} {
+		if _, ok := d.Fields[k]; ok {
+			t.Fatalf("%s vazou: %v", k, d.Fields)
+		}
+	}
+	if d.Fields["cp"] != "" {
 		t.Fatalf("aviso: %v", d.Fields)
+	}
+}
+
+func TestFlexInt(t *testing.T) {
+	var v struct{ A, B, C, D, E, F, G flexInt }
+	if err := json.Unmarshal([]byte(`{"A":147,"B":"147","C":147.0,"D":null,"E":"x","F":-3,"G":99999999999999999999999}`),
+		&v); err != nil {
+		t.Fatal(err)
+	}
+	if v.A != 147 || v.B != 147 || v.C != 147 || v.D != 0 || v.E != 0 || v.F != 0 || v.G != 0 {
+		t.Fatalf("%+v", v)
+	}
+}
+
+func TestFlexID(t *testing.T) {
+	var v struct{ A, B, C, D, E flexID }
+	if err := json.Unmarshal([]byte(`{"A":"Alola","B":0,"C":null,"D":"Galar\u00e9 \"x\"","E":"3265749275115993354"}`), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.A != "Alola" || v.B != "0" || v.C != "" || v.D != `Galaré "x"` || v.E != "3265749275115993354" {
+		t.Fatalf("%+v", v)
 	}
 }
 
