@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -130,8 +131,18 @@ func TestSeal(t *testing.T) {
 	if h, err := New(Config{Workers: "64"}, nil, nil); err != nil || h.workers != 64 {
 		t.Fatalf("POGO_WORKERS=64: %v", err)
 	}
-	if h, _ := New(Config{}, nil, nil); h.workers != defaultWorkers {
-		t.Fatalf("padrão: %d", h.workers)
+	if h, _ := New(Config{}, nil, nil); h.workers != 32 || h.interval != 3*time.Minute {
+		t.Fatalf("padrão: %d workers, %v", h.workers, h.interval)
+	}
+	for _, bad := range []string{"1m59s", "10m1s", "3", "x", "-3m"} {
+		if _, err := New(Config{AlertInterval: bad}, nil, nil); err == nil {
+			t.Errorf("POGO_ALERT_INTERVAL=%q aceito", bad)
+		}
+	}
+	for in, want := range map[string]time.Duration{"2m": 2 * time.Minute, "10m": 10 * time.Minute, "5m30s": 330 * time.Second} {
+		if h, err := New(Config{AlertInterval: in}, nil, nil); err != nil || h.interval != want {
+			t.Errorf("POGO_ALERT_INTERVAL=%q: %v %v", in, h, err)
+		}
 	}
 	for _, bad := range []string{"x", base64.StdEncoding.EncodeToString(make([]byte, 16)), "não-base64!"} {
 		if _, err := New(Config{TokenKey: bad}, nil, nil); err == nil {
@@ -454,4 +465,37 @@ func TestProxyGzip(t *testing.T) {
 		w.Body.String() != `{"error":"upstream","status":429,"detail":{"error":"rate_limited","retry_after":7},"retry_after":7}`+"\n" {
 		t.Fatalf("erro comprimido: %d %q", w.Code, w.Body.String())
 	}
+}
+
+// Prazo estourado no PoGo é 504 upstream_timeout; o PoGo fora (conexão recusada) segue 502.
+func TestProxyTimeout(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	up := http.NewServeMux()
+	up.HandleFunc("POST /map/lookup", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body) // sem ler o corpo, o servidor não percebe o cliente indo embora
+		select {                  // o PoGo lento além do prazo
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	})
+	h := newHandler(t, pool, fakeUpstream(t, up))
+	u := newUser(t, pool)
+	link(t, h, u, secretTok)
+	mux := http.NewServeMux()
+	h.Routes(mux, func(next http.HandlerFunc) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next(w, r.WithContext(httpx.WithUser(r.Context(), u)))
+		})
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond) // o Timed respeita o prazo menor
+	defer cancel()
+	r := httptest.NewRequest("POST", "/v1/pogo/lookup", strings.NewReader(`{}`)).WithContext(ctx)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	wantError(t, w, 504, "upstream_timeout")
+
+	down := newHandler(t, pool, "http://127.0.0.1:1")
+	link(t, down, u, secretTok)
+	wantError(t, serve(down, u, "POST", "/v1/pogo/lookup", `{}`), 502, "upstream_unavailable")
 }

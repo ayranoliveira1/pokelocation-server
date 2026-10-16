@@ -37,6 +37,7 @@ services:
       FCM_CREDENTIALS: ${FCM_CREDENTIALS:-}
       POGO_TOKEN_KEY: ${POGO_TOKEN_KEY:-}
       POGO_WORKERS: ${POGO_WORKERS:-}
+      POGO_ALERT_INTERVAL: ${POGO_ALERT_INTERVAL:-}
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_started}

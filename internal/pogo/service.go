@@ -19,13 +19,16 @@ import (
 type Config struct {
 	TokenKey string // 32 bytes em base64 padrão; vazio = integração desligada
 	Upstream string // vazio = DefaultUpstream
-	Workers  string // POGO_WORKERS: alertas em paralelo por instância, 1–64; vazio = 8
+	Workers  string // POGO_WORKERS: alertas em paralelo por instância, 1–64; vazio = 32
+	// POGO_ALERT_INTERVAL: de quanto em quanto tempo cada usuário roda (2m–10m); vazio = 3m
+	AlertInterval string
 }
 
 var (
 	ErrRelogin      = errors.New("pogo_relogin")
 	ErrInvalidGrant = errors.New("invalid_grant")
 	ErrUnavailable  = errors.New("upstream_unavailable")
+	ErrTimeout      = errors.New("upstream_timeout")
 )
 
 const (
@@ -123,7 +126,7 @@ func (s *Service) Login(ctx context.Context, user, provider, code string) (*Prof
 	body, _ := json.Marshal(map[string]string{"code": code})
 	rep, err := s.c.do(ctx, "POST", "/auth/"+provider+"/callback", "", body, maxProfile, false, buf)
 	if err != nil {
-		return nil, ErrUnavailable
+		return nil, upErr(err)
 	}
 	if err := classify(rep.status, rep.retryAfter, buf.Bytes()); err != nil {
 		if rep.status == 400 || errors.Is(err, errUnauthorized) {
@@ -140,7 +143,7 @@ func (s *Service) Login(ctx context.Context, user, provider, code string) (*Prof
 	buf.Reset()
 	rep, err = s.c.do(ctx, "GET", "/users/me", out.Token, nil, maxProfile, false, buf)
 	if err != nil {
-		return nil, ErrUnavailable
+		return nil, upErr(err)
 	}
 	if err := classify(rep.status, rep.retryAfter, buf.Bytes()); err != nil {
 		if errors.Is(err, errUnauthorized) { // token recém-emitido recusado: problema deles
@@ -198,7 +201,7 @@ func (s *Service) call(ctx context.Context, user, method, path string, body []by
 func (s *Service) callToken(ctx context.Context, user string, enc []byte, token, method, path string, body []byte, max int64, gz bool, buf *bytes.Buffer) (bool, error) {
 	rep, err := s.c.do(ctx, method, path, token, body, max, gz, buf)
 	if err != nil {
-		return false, ErrUnavailable
+		return false, upErr(err)
 	}
 	if err := classify(rep.status, rep.retryAfter, buf.Bytes()); err != nil {
 		if errors.Is(err, errUnauthorized) {
@@ -207,6 +210,14 @@ func (s *Service) callToken(ctx context.Context, user string, enc []byte, token,
 		return false, err
 	}
 	return rep.gzip, nil
+}
+
+// upErr: prazo estourado vira ErrTimeout (504); conexão, TLS ou resposta grande demais, ErrUnavailable (502).
+func upErr(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrTimeout
+	}
+	return ErrUnavailable
 }
 
 // drop roda mesmo com o pedido cancelado: o token já se provou inválido.

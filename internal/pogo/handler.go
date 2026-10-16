@@ -25,13 +25,15 @@ const (
 	maxReveal   = 512
 	reqWait     = 5 * time.Second
 	proxyWait   = 15 * time.Second
+	lookupWait  = 30 * time.Second // o /map/lookup e o /search deles levam 7–15 s
 	trainerWait = 60 * time.Second // o trainer lookup deles leva até 1 min
 )
 
 type Handler struct {
-	svc     *Service // nil = sem POGO_TOKEN_KEY: tudo responde 503 pogo_disabled
-	q       *queue
-	workers int
+	svc      *Service // nil = sem POGO_TOKEN_KEY: tudo responde 503 pogo_disabled
+	q        *queue
+	workers  int
+	interval time.Duration
 
 	login, me, lookup, search, reveal, trainer, trainerLookup, trainerConfirm, rules *ratelimit.Limiter
 }
@@ -48,7 +50,14 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		trainerConfirm: ratelimit.NewWindow(25, time.Hour),
 		rules:          ratelimit.New(30),
 	}
-	h.workers = defaultWorkers
+	h.workers, h.interval = defaultWorkers, defaultInterval
+	if cfg.AlertInterval != "" {
+		d, err := time.ParseDuration(cfg.AlertInterval)
+		if err != nil || d < minInterval || d > maxInterval {
+			return nil, fmt.Errorf("pogo: POGO_ALERT_INTERVAL deve ser de %v a %v (ex.: 3m)", minInterval, maxInterval)
+		}
+		h.interval = d
+	}
 	if cfg.Workers != "" {
 		n, err := strconv.Atoi(cfg.Workers)
 		if err != nil || n < 1 || n > maxWorkers {
@@ -87,8 +96,8 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	route("POST /v1/pogo/login", h.login, proxyWait, h.postLogin)
 	route("DELETE /v1/pogo/login", nil, reqWait, h.deleteLogin)
 	route("GET /v1/pogo/me", h.me, proxyWait, h.getMe)
-	route("POST /v1/pogo/lookup", h.lookup, proxyWait, h.proxy("/map/lookup", 1<<20))
-	route("POST /v1/pogo/search", h.search, proxyWait, h.proxy("/search", 256<<10))
+	route("POST /v1/pogo/lookup", h.lookup, lookupWait, h.proxy("/map/lookup", 1<<20))
+	route("POST /v1/pogo/search", h.search, lookupWait, h.proxy("/search", 256<<10))
 	route("GET /v1/pogo/reveal/{code}", h.reveal, proxyWait, h.getReveal)
 	route("GET /v1/pogo/trainer", h.trainer, proxyWait, h.proxy("/trainer", 64<<10))
 	route("POST /v1/pogo/trainer/lookup", h.trainerLookup, trainerWait, h.proxy("/trainer/lookup", 64<<10))
@@ -265,6 +274,8 @@ func fail(w http.ResponseWriter, err error) {
 		httpx.Error(w, http.StatusBadRequest, "invalid_grant")
 	case errors.Is(err, ErrUnavailable):
 		httpx.Error(w, http.StatusBadGateway, "upstream_unavailable")
+	case errors.Is(err, ErrTimeout):
+		httpx.Error(w, http.StatusGatewayTimeout, "upstream_timeout")
 	case errors.Is(err, ErrNotFound):
 		httpx.Error(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, ErrTooManyRules):

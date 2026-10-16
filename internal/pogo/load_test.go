@@ -146,7 +146,7 @@ func TestQueueLoad(t *testing.T) {
 	t.Logf("Redis: %.2f idas por usuário; processo inteiro (inclui o PoGo falso): %.0f allocs e %.1f KB por usuário",
 		float64(rtt)/float64(n), float64(m1.Mallocs-m0.Mallocs)/float64(n), float64(m1.TotalAlloc-m0.TotalAlloc)/float64(n)/1024)
 	t.Logf("capacidade com %d workers: %.0f usuários (1 regra) por intervalo de %v", w.workers,
-		float64(w.workers)*interval.Seconds()/lat.Seconds(), interval)
+		float64(w.workers)*defaultInterval.Seconds()/lat.Seconds(), defaultInterval)
 }
 
 type loadFCM struct {

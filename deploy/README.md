@@ -51,14 +51,17 @@ GOMEMLIMIT=2GiB
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 POGO_TOKEN_KEY=<openssl rand -base64 32>
-POGO_WORKERS=8
+POGO_WORKERS=32
+POGO_ALERT_INTERVAL=3m
 BACKUP_PAR_URL=
 ```
 
-`POGO_WORKERS` (1–64) é quantos usuários com alerta do PoGo cada instância atende ao mesmo tempo. Com o log
-`pogo: fila atrasada` aparecendo, aumente no `.env` e recrie só o servidor, sem deploy de código:
-`docker compose up -d server`. Capacidade ≈ workers × 120 s / latência do PoGo usuários a cada 2 min (≈4.800 com 8 e
-200 ms); mais workers = mais pressão no PoGo.
+`POGO_WORKERS` (1–64) é quantos usuários com alerta do PoGo cada instância atende ao mesmo tempo, e
+`POGO_ALERT_INTERVAL` (2m–10m) de quanto em quanto tempo cada um roda. Capacidade ≈ workers × intervalo / latência do
+PoGo, por regra: o PoGo leva 5–15 s por chamada (~7 s típico), então 32 com 3 min ≈ 850 usuários com 1 alerta
+(≈85 com 10 regras; ≈380 se o PoGo ficar em 15 s), e 64 ≈ 1.650. Com o log `pogo: fila atrasada` aparecendo, aumente
+os workers (mais pressão no PoGo) ou o intervalo (alerta mais tardio) no `.env` e recrie só o servidor, sem deploy de
+código: `docker compose up -d server`.
 
 Os `.so.gz` da libsignal são reserva do download do GitHub: copie `tools/libsignal/out/0.86.5` do repo do app para
 `/opt/pokelocation-static/libsignal-0.86.5/`.

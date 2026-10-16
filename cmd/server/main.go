@@ -59,7 +59,7 @@ func loadConfig() (config, error) {
 			PublicURL:          os.Getenv("PUBLIC_URL"),
 		},
 		pogo: pogo.Config{TokenKey: os.Getenv("POGO_TOKEN_KEY"), Upstream: os.Getenv("POGO_UPSTREAM_URL"),
-			Workers: os.Getenv("POGO_WORKERS")},
+			Workers: os.Getenv("POGO_WORKERS"), AlertInterval: os.Getenv("POGO_ALERT_INTERVAL")},
 	}
 	if c.addr == "" {
 		c.addr = ":8080"
@@ -150,7 +150,7 @@ func run() error {
 		return err
 	}
 	pushSvc := push.New(pool, sender)
-	pushSvc.DataWorkers = pogoH.Workers() / 2 // cada SendEach leva ~100 ms; o worker do PoGo, ~200 ms por regra
+	pushSvc.DataWorkers = pogoH.Workers() / 2 // cada SendEach leva ~100 ms, bem abaixo dos segundos de cada regra no PoGo
 	hub.Notify = pushSvc.Notify
 	go pushSvc.Run(ctx)
 	go pogoH.Run(ctx, pushSvc)

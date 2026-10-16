@@ -317,7 +317,7 @@ func BenchmarkWorkerRound(b *testing.B) {
 				}
 			}()
 			pass := func() {
-				clk.add(interval + time.Second) // todos vencidos
+				clk.add(defaultInterval + time.Second) // todos vencidos
 				now := clk.now()
 				_ = watch.ZAdd(ctx, dueKey, func() []redis.Z {
 					zs := make([]redis.Z, len(users))
@@ -327,7 +327,7 @@ func BenchmarkWorkerRound(b *testing.B) {
 					return zs
 				}()...).Err()
 				h.q.signal()
-				done := strconv.FormatInt(now.Add(interval).UnixMilli(), 10)
+				done := strconv.FormatInt(now.Add(defaultInterval).UnixMilli(), 10)
 				for watch.ZCount(ctx, dueKey, done, done).Val() < int64(len(users)) {
 					time.Sleep(100 * time.Microsecond)
 				}

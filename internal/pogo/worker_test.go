@@ -249,7 +249,7 @@ func TestWorker(t *testing.T) {
 			t.Fatalf("regras de e: %+v", list.Rules)
 		}
 	}
-	for u, want := range map[string]time.Duration{a: interval, e: interval, d: 300 * time.Second} {
+	for u, want := range map[string]time.Duration{a: defaultInterval, e: defaultInterval, d: 300 * time.Second} {
 		if s, ok := score(t, rdb, u); !ok || !s.Equal(start.Add(want)) {
 			t.Errorf("reagendado em agora+%v, queria agora+%v", s.Sub(start), want)
 		}
@@ -264,7 +264,7 @@ func TestWorker(t *testing.T) {
 	}
 
 	// próxima execução: só os 3 que sobraram no raio, nada repetido; d ainda espera o retry_after
-	clk.add(interval + time.Second)
+	clk.add(defaultInterval + time.Second)
 	drain(t, w)
 	for _, p := range fcm.take(t, 2) {
 		if p.user == a {
@@ -283,7 +283,7 @@ func TestWorker(t *testing.T) {
 	}
 	mu.Unlock()
 
-	clk.add(interval + time.Second) // tudo já avisado
+	clk.add(defaultInterval + time.Second) // tudo já avisado
 	drain(t, w)
 	time.Sleep(50 * time.Millisecond)
 	if got := fcm.take(t, 0); len(got) != 0 {
@@ -294,7 +294,7 @@ func TestWorker(t *testing.T) {
 	for _, id := range []string{r1, r2} {
 		serve(h, a, "PUT", "/v1/pogo/rules/"+id, `{"name":"x","filters":{},"scope":"world","enabled":false}`)
 	}
-	clk.add(interval + time.Second)
+	clk.add(defaultInterval + time.Second)
 	drain(t, w)
 	if _, ok := score(t, rdb, a); ok {
 		t.Fatal("sem regra ativa e ainda na fila")

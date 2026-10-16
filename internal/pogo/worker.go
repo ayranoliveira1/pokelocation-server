@@ -20,16 +20,20 @@ import (
 )
 
 const (
-	interval       = 2 * time.Minute
-	defaultWorkers = 8 // por instância: limita a pressão sobre o PoGo (POGO_WORKERS muda)
-	maxWorkers     = 64
-	claimBatch     = 4
-	perRule        = 5 // avisos por regra a cada execução
-	numResults     = 100
-	maxSeen        = 2 * time.Hour
-	unknownTTL     = time.Hour
+	defaultInterval = 3 * time.Minute // POGO_ALERT_INTERVAL muda, de minInterval a maxInterval
+	minInterval     = 2 * time.Minute
+	maxInterval     = 10 * time.Minute
+	defaultWorkers  = 32 // por instância: cada chamada ao PoGo leva 5–15 s (POGO_WORKERS muda)
+	maxWorkers      = 64
+	claimBatch      = 4
+	perRule         = 5 // avisos por regra a cada execução
+	numResults      = 100
+	maxSeen         = 2 * time.Hour
+	unknownTTL      = time.Hour
 	// todas as regras no timeout; o lease passa disso, então não precisa de heartbeat
-	userWait     = maxRules * proxyWait
+	// teto do tempo de um usuário: 10 regras no prazo de 30 s = 5 min; o lease passa disso, então não precisa de
+	// heartbeat (só pesa quando uma instância cai no meio: o usuário volta em até 5,5 min)
+	userWait     = maxRules * lookupWait
 	lease        = userWait + 30*time.Second
 	maxSleep     = time.Second // pega o que outra instância enfileirou
 	rebuildEvery = time.Minute
@@ -81,8 +85,8 @@ type worker struct {
 }
 
 func newWorker(svc *Service, q *queue, p *push.Service) *worker {
-	return &worker{svc: svc, q: q, push: p, now: time.Now, workers: defaultWorkers, interval: interval, lease: lease, userWait: userWait,
-		callWait: proxyWait}
+	return &worker{svc: svc, q: q, push: p, now: time.Now, workers: defaultWorkers, interval: defaultInterval, lease: lease, userWait: userWait,
+		callWait: lookupWait}
 }
 
 // Run atende a fila até ctx acabar. Sem POGO_TOKEN_KEY não faz nada.
@@ -91,7 +95,7 @@ func (h *Handler) Run(ctx context.Context, p *push.Service) {
 		return
 	}
 	w := newWorker(h.svc, h.q, p)
-	w.workers = h.workers
+	w.workers, w.interval = h.workers, h.interval
 	w.run(ctx)
 }
 
