@@ -13,15 +13,17 @@ func TestIndices(t *testing.T) {
 	pool := testdb.Pool(t)
 	checkIndices(t, pool)
 	// qQueueUsers (reconstrução) lê todas as regras ativas: varre o índice parcial inteiro, sem Index Cond.
-	partial := false
-	for _, n := range append(testdb.Plan(t, pool, qQueueUsers), testdb.GenericPlan(t, pool, qQueueUsers)...) {
-		if n.Type == "Seq Scan" || testdb.IsSort(n) {
-			t.Errorf("qQueueUsers: %s em %s", n.Type, n.Relation)
+	for _, q := range []string{qQueueUsers, qQueueUsersShared} {
+		partial := false
+		for _, n := range append(testdb.Plan(t, pool, q), testdb.GenericPlan(t, pool, q)...) {
+			if n.Type == "Seq Scan" || testdb.IsSort(n) {
+				t.Errorf("%s: %s em %s", q, n.Type, n.Relation)
+			}
+			partial = partial || n.Index == "pogo_rules_enabled"
 		}
-		partial = partial || n.Index == "pogo_rules_enabled"
-	}
-	if !partial {
-		t.Error("qQueueUsers não usa pogo_rules_enabled")
+		if !partial {
+			t.Errorf("%s não usa pogo_rules_enabled", q)
+		}
 	}
 }
 

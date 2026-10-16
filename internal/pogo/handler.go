@@ -66,6 +66,9 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		h.workers = n
 	}
 	if cfg.TokenKey == "" {
+		if cfg.SharedTokens != "" {
+			return nil, errors.New("pogo: POGO_SHARED_TOKENS exige POGO_TOKEN_KEY")
+		}
 		return h, nil
 	}
 	svc, err := newService(cfg, pool)
@@ -76,7 +79,7 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 // Workers: POGO_WORKERS validado (padrão 8).
 func (h *Handler) Workers() int { return h.workers }
 
-// Enqueue põe o usuário na fila dos alertas (regra ligada, vínculo, token FCM novo). Quem não deve estar lá sai na
+// Enqueue põe o usuário na fila dos alertas (regra ligada, token FCM novo). Quem não deve estar lá sai na
 // primeira execução. Sem POGO_TOKEN_KEY não faz nada.
 func (h *Handler) Enqueue(user string) {
 	if h.svc == nil {
@@ -96,11 +99,11 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	route("POST /v1/pogo/login", h.login, proxyWait, h.postLogin)
 	route("DELETE /v1/pogo/login", nil, reqWait, h.deleteLogin)
 	route("GET /v1/pogo/me", h.me, proxyWait, h.getMe)
-	route("POST /v1/pogo/lookup", h.lookup, lookupWait, h.proxy("/map/lookup", 1<<20))
-	route("POST /v1/pogo/search", h.search, lookupWait, h.proxy("/search", 256<<10))
+	route("POST /v1/pogo/lookup", h.lookup, lookupWait, h.proxy("/map/lookup", 1<<20, true))
+	route("POST /v1/pogo/search", h.search, lookupWait, h.proxy("/search", 256<<10, true))
 	route("GET /v1/pogo/reveal/{code}", h.reveal, proxyWait, h.getReveal)
-	route("GET /v1/pogo/trainer", h.trainer, proxyWait, h.proxy("/trainer", 64<<10))
-	route("POST /v1/pogo/trainer/lookup", h.trainerLookup, trainerWait, h.proxy("/trainer/lookup", 64<<10))
+	route("GET /v1/pogo/trainer", h.trainer, proxyWait, h.proxy("/trainer", 64<<10, false))
+	route("POST /v1/pogo/trainer/lookup", h.trainerLookup, trainerWait, h.proxy("/trainer/lookup", 64<<10, false))
 	route("POST /v1/pogo/trainer/confirm", h.trainerConfirm, trainerWait, h.confirmTrainer)
 	route("GET /v1/pogo/rules", h.rules, reqWait, h.listRules)
 	route("POST /v1/pogo/rules", h.rules, reqWait, h.createRule)
@@ -148,6 +151,10 @@ func (h *Handler) deleteLogin(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	if len(h.svc.shared) > 0 { // as regras sem shiny seguem rodando com os tokens do servidor
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if err := h.q.remove(r.Context(), httpx.User(r.Context())); err != nil { // sobrando, sai na próxima execução
 		slog.Warn("pogo: tirar da fila", "err_type", fmt.Sprintf("%T", err))
 	}
@@ -176,18 +183,18 @@ func (h *Handler) getReveal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	h.forward(w, r, "GET", "/reveal/"+url.PathEscape(code), nil, 16<<10)
+	h.forward(w, r, "GET", "/reveal/"+url.PathEscape(code), nil, 16<<10, true)
 }
 
-// proxy: GET sem corpo; POST com um objeto JSON repassado como veio.
-func (h *Handler) proxy(path string, max int64) http.HandlerFunc {
+// proxy: GET sem corpo; POST com um objeto JSON repassado como veio. shared = pode ir pelos tokens do servidor.
+func (h *Handler) proxy(path string, max int64, shared bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			h.forward(w, r, "GET", path, nil, max)
+			h.forward(w, r, "GET", path, nil, max, shared)
 			return
 		}
 		if body, ok := decodeObject(w, r); ok {
-			h.forward(w, r, "POST", path, body, max)
+			h.forward(w, r, "POST", path, body, max, shared)
 		}
 	}
 }
@@ -204,11 +211,17 @@ func decodeObject(w http.ResponseWriter, r *http.Request) (json.RawMessage, bool
 	return body, true
 }
 
-func (h *Handler) forward(w http.ResponseWriter, r *http.Request, method, path string, body []byte, max int64) {
+func (h *Handler) forward(w http.ResponseWriter, r *http.Request, method, path string, body []byte, max int64, shared bool) {
 	buf := getBuf()
 	defer putBuf(buf)
 	gz := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
-	_, gzipped, err := h.svc.call(r.Context(), httpx.User(r.Context()), method, path, body, max, gz, buf)
+	var gzipped bool
+	var err error
+	if shared {
+		gzipped, err = h.svc.search(r.Context(), httpx.User(r.Context()), method, path, body, max, gz, buf)
+	} else {
+		_, gzipped, err = h.svc.call(r.Context(), httpx.User(r.Context()), method, path, body, max, gz, buf)
+	}
 	if err != nil {
 		fail(w, err)
 		return

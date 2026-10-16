@@ -39,18 +39,20 @@ const (
 	rebuildEvery = time.Minute
 )
 
-// Conta, token FCM (devices tem um aparelho por usuário) e regras ativas numa ida só, com o token_enc uma vez.
+// Conta (token_enc nulo sem vínculo), token FCM (devices tem um aparelho por usuário) e regras ativas numa ida só.
 const qUserRules = `SELECT a.token_enc, d.fcm_token,
 		coalesce((SELECT json_agg(json_build_object('id', r.id, 'name', r.name, 'filters', r.filters, 'scope', r.scope,
 			'lat', r.lat, 'lng', r.lng, 'radius_km', r.radius_km) ORDER BY r.created_at)
-			FROM pogo_rules r WHERE r.user_id = a.user_id AND r.enabled), '[]')
-	FROM pogo_accounts a LEFT JOIN devices d ON d.user_id = a.user_id
-	WHERE a.user_id = $1`
+			FROM pogo_rules r WHERE r.user_id = u.id AND r.enabled), '[]')
+	FROM users u LEFT JOIN pogo_accounts a ON a.user_id = u.id LEFT JOIN devices d ON d.user_id = u.id
+	WHERE u.id = $1`
 
-// Quem deve estar na fila: reconstrói um Redis que voltou vazio.
-const qQueueUsers = `SELECT DISTINCT r.user_id::text FROM pogo_rules r
-	WHERE r.enabled AND EXISTS (SELECT 1 FROM pogo_accounts a WHERE a.user_id = r.user_id)
-		AND EXISTS (SELECT 1 FROM devices d WHERE d.user_id = r.user_id AND d.fcm_token IS NOT NULL)`
+// Quem deve estar na fila: reconstrói um Redis que voltou vazio. Com POGO_SHARED_TOKENS o vínculo não é exigido.
+const (
+	qQueueUsersShared = `SELECT DISTINCT r.user_id::text FROM pogo_rules r
+	WHERE r.enabled AND EXISTS (SELECT 1 FROM devices d WHERE d.user_id = r.user_id AND d.fcm_token IS NOT NULL)`
+	qQueueUsers = qQueueUsersShared + ` AND EXISTS (SELECT 1 FROM pogo_accounts a WHERE a.user_id = r.user_id)`
+)
 
 type dueRule struct {
 	ID       string          `json:"id"`
@@ -174,9 +176,13 @@ func (w *worker) run(ctx context.Context) {
 	}
 }
 
-// rebuild põe na fila (ZADD NX, vencido) quem tem regra ativa, vínculo e token FCM. Idempotente entre instâncias.
+// rebuild põe na fila (ZADD NX, vencido) quem tem regra ativa e token FCM. Idempotente entre instâncias.
 func (w *worker) rebuild(ctx context.Context) {
-	rows, err := w.svc.store.pool.Query(ctx, qQueueUsers)
+	q := qQueueUsers
+	if len(w.svc.shared) > 0 {
+		q = qQueueUsersShared
+	}
+	rows, err := w.svc.store.pool.Query(ctx, q)
 	var users []string
 	if err == nil {
 		users, err = pgx.CollectRows(rows, pgx.RowTo[string])
@@ -220,7 +226,8 @@ func (w *worker) user(ctx context.Context, c claim, sc *scratch) {
 	}
 }
 
-// runUser devolve quando rodar de novo; zero = sai da fila (sem vínculo, sem regra ativa ou sem token FCM).
+// runUser devolve quando rodar de novo; zero = sai da fila (sem regra que rode, sem token FCM ou usuário apagado).
+// Sem POGO_SHARED_TOKENS, ou com filtro shiny, a regra precisa do vínculo.
 func (w *worker) runUser(ctx context.Context, c claim, sc *scratch) time.Time {
 	now := w.now()
 	next := now.Add(w.interval)
@@ -235,14 +242,27 @@ func (w *worker) runUser(ctx context.Context, c claim, sc *scratch) time.Time {
 	if fcm == nil || len(rules) == 0 {
 		return time.Time{}
 	}
-	token, err := w.svc.open(c.user, enc)
-	if err != nil {
-		_ = w.svc.drop(ctx, c.user, enc)
+	var token string
+	if enc != nil {
+		if token, err = w.svc.open(c.user, enc); err != nil {
+			_ = w.svc.drop(ctx, c.user, enc)
+			enc = nil
+		}
+	}
+	shared := len(w.svc.shared) > 0
+	if !shared && enc == nil {
 		return time.Time{}
 	}
+	ran := false
 	sc.cands, sc.counts, sc.groups = sc.cands[:0], sc.counts[:0], sc.groups[:0]
 	for i := range rules {
 		r := &rules[i]
+		own := !shared || wantsShiny(r.Filters)
+		if own && enc == nil {
+			sc.skip()
+			continue
+		}
+		ran = true
 		path, limit := "/map/lookup", int64(1<<20)
 		if r.Scope == "world" {
 			path, limit = "/search", 256<<10
@@ -254,7 +274,13 @@ func (w *worker) runUser(ctx context.Context, c claim, sc *scratch) time.Time {
 		}
 		sc.buf.Reset()
 		cctx, cancel := context.WithTimeout(ctx, w.callWait)
-		_, err = w.svc.callToken(cctx, c.user, enc, token, "POST", path, body, limit, false, &sc.buf)
+		if own {
+			_, err = w.svc.callToken(cctx, c.user, enc, token, "POST", path, body, limit, false, &sc.buf)
+		} else if _, err = w.svc.callShared(cctx, "POST", path, body, limit, false, &sc.buf); err == errSharedRefused && enc != nil {
+			own = true
+			sc.buf.Reset()
+			_, err = w.svc.callToken(cctx, c.user, enc, token, "POST", path, body, limit, false, &sc.buf)
+		}
 		stuck := err != nil && cctx.Err() != nil && ctx.Err() == nil // só esta chamada travou: as outras regras ainda rodam
 		cancel()
 		var ue *UpstreamError
@@ -264,10 +290,15 @@ func (w *worker) runUser(ctx context.Context, c claim, sc *scratch) time.Time {
 			}
 			break
 		}
-		if errors.Is(err, ErrRelogin) {
-			return time.Time{}
+		if errors.Is(err, ErrRelogin) { // o vínculo já foi apagado; as regras sem shiny seguem pelo servidor
+			if !shared {
+				return time.Time{}
+			}
+			enc = nil
+			sc.skip()
+			continue
 		}
-		if ue != nil && ue.Status == http.StatusForbidden {
+		if own && ue != nil && ue.Status == http.StatusForbidden {
 			if code := ue.code(); code == "trainer_not_linked" || code == "shiny_account_unavailable" {
 				// o treinador saiu ou nunca valeu: a regra repetiria o erro a cada execução
 				if err := w.svc.store.disableRule(ctx, c.user, r, reasonTrainer); err != nil {
@@ -288,6 +319,9 @@ func (w *worker) runUser(ctx context.Context, c claim, sc *scratch) time.Time {
 	}
 	if len(sc.cands) > 0 {
 		w.notify(ctx, c, rules, *fcm, now, sc)
+	}
+	if !ran {
+		return time.Time{}
 	}
 	return next
 }

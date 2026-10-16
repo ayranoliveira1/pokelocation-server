@@ -116,15 +116,11 @@ type trainerRef struct {
 // checkTrainer: filtro shiny (shiny_only, background_only, shiny_account) só com treinador ativo no vínculo, e o
 // shiny_account tem de ser um deles. Sem filtro shiny, não lê o banco.
 func (s *Store) checkTrainer(ctx context.Context, user string, filters json.RawMessage) error {
-	var f struct {
-		ShinyOnly      bool   `json:"shiny_only"`
-		BackgroundOnly bool   `json:"background_only"`
-		ShinyAccount   string `json:"shiny_account"`
-	}
+	var f shinyFilters
 	if json.Unmarshal(filters, &f) != nil {
 		return errBadRule
 	}
-	if !f.ShinyOnly && !f.BackgroundOnly && f.ShinyAccount == "" {
+	if !f.any() {
 		return nil
 	}
 	var raw []byte

@@ -59,7 +59,8 @@ func loadConfig() (config, error) {
 			PublicURL:          os.Getenv("PUBLIC_URL"),
 		},
 		pogo: pogo.Config{TokenKey: os.Getenv("POGO_TOKEN_KEY"), Upstream: os.Getenv("POGO_UPSTREAM_URL"),
-			Workers: os.Getenv("POGO_WORKERS"), AlertInterval: os.Getenv("POGO_ALERT_INTERVAL")},
+			Workers: os.Getenv("POGO_WORKERS"), AlertInterval: os.Getenv("POGO_ALERT_INTERVAL"),
+			SharedTokens: os.Getenv("POGO_SHARED_TOKENS")},
 	}
 	if c.addr == "" {
 		c.addr = ":8080"
