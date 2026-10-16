@@ -18,7 +18,9 @@ const (
 )
 
 type Handler struct {
-	store *Store
+	// OnToken, se não for nil, roda depois de gravar um token novo. Definido antes de servir.
+	OnToken func(user string)
+	store   *Store
 }
 
 func NewHandler(pool *pgxpool.Pool) *Handler { return &Handler{store: &Store{pool: pool}} }
@@ -47,6 +49,9 @@ func (h *Handler) putToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		httpx.Error(w, http.StatusNotFound, "not_found") // sem aparelho: o PUT /v1/keys vem antes
 		return
+	}
+	if tok != nil && h.OnToken != nil {
+		h.OnToken(httpx.User(r.Context()))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

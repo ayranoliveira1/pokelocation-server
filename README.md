@@ -41,6 +41,9 @@ Instale `caddy-local-root.crt` só no emulador; só a build debug do app confia 
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | vazio = login Google desligado | |
 | `PUBLIC_URL` | — | `https://<host>` visto pelo navegador (redirect do Google) |
 | `FCM_CREDENTIALS` | vazio = push falso (só loga `fcm ping`) | caminho do JSON da conta de serviço do Firebase (deploy) |
+| `POGO_TOKEN_KEY` | vazio = PoGo desligado (`/v1/pogo/*` → 503) | chave AES-256 dos tokens do PoGo Coordinates, 32 bytes em base64 (`openssl rand -base64 32`). Trocar invalida os vínculos (o app pede login de novo) |
+| `POGO_WORKERS` | `8` | alertas do PoGo em paralelo por instância (1–64). Capacidade ≈ workers × 120 s / latência do PoGo usuários por 2 min (≈4.800 com 8 e 200 ms); o log `pogo: fila atrasada` avisa quando falta. Mais workers = mais pressão no PoGo |
+| `POGO_UPSTREAM_URL` | `https://coordinates-api.pokemongopro.com` | só para teste local com um PoGo falso |
 | `LOG_REQUESTS` | vazio = desligado | `1` = log de cada requisição (método, rota sem query, status, ms), só para depurar no local |
 | `PPROF_ADDR` | vazio = desligado | endereço **interno** do pprof (ex.: `127.0.0.1:6060`) |
 | `CLUSTER` | vazio = uma instância | `1` = várias instâncias atrás do mesmo Redis (repasse do WS por pub/sub). Cada instância abre até 32 conexões no Postgres (`pool_max_conns` no `DATABASE_URL` muda): instâncias × pool < `max_connections` (100 por padrão) |

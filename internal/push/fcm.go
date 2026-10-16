@@ -2,6 +2,7 @@ package push
 
 import (
 	"context"
+	"errors"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
@@ -33,7 +34,29 @@ func (f fcmSender) Send(ctx context.Context, _, token string) error {
 		Data:    map[string]string{"t": "m"},
 		Android: &messaging.AndroidConfig{Priority: "high", CollapseKey: "m"},
 	})
-	// InvalidArgument pode ser erro nosso de formato: tratá-lo como token inválido apagaria todos os tokens.
+	return fcmErr(err)
+}
+
+// SendData: até 500 mensagens, enviadas em paralelo pela lib.
+func (f fcmSender) SendData(ctx context.Context, _, token string, msgs []Data) error {
+	ms := make([]*messaging.Message, len(msgs))
+	for i, d := range msgs {
+		ttl := d.TTL
+		ms[i] = &messaging.Message{Token: token, Data: d.Fields,
+			Android: &messaging.AndroidConfig{Priority: "high", CollapseKey: d.Collapse, TTL: &ttl}}
+	}
+	br, err := f.c.SendEach(ctx, ms)
+	if err != nil {
+		return fcmErr(err)
+	}
+	for _, r := range br.Responses {
+		err = errors.Join(err, fcmErr(r.Error))
+	}
+	return err
+}
+
+// InvalidArgument pode ser erro nosso de formato: tratá-lo como token inválido apagaria todos os tokens.
+func fcmErr(err error) error {
 	if messaging.IsUnregistered(err) || messaging.IsSenderIDMismatch(err) {
 		return ErrInvalidToken
 	}

@@ -26,6 +26,7 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/groups"
 	"github.com/ayranoliveira1/pokelocation-server/internal/keys"
 	"github.com/ayranoliveira1/pokelocation-server/internal/location"
+	"github.com/ayranoliveira1/pokelocation-server/internal/pogo"
 	"github.com/ayranoliveira1/pokelocation-server/internal/push"
 	"github.com/ayranoliveira1/pokelocation-server/internal/relay"
 	"github.com/ayranoliveira1/pokelocation-server/internal/wire"
@@ -38,6 +39,7 @@ type config struct {
 	fcmCredentials              string
 	cluster                     bool
 	auth                        auth.Config
+	pogo                        pogo.Config
 }
 
 func loadConfig() (config, error) {
@@ -55,6 +57,8 @@ func loadConfig() (config, error) {
 			GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 			PublicURL:          os.Getenv("PUBLIC_URL"),
 		},
+		pogo: pogo.Config{TokenKey: os.Getenv("POGO_TOKEN_KEY"), Upstream: os.Getenv("POGO_UPSTREAM_URL"),
+			Workers: os.Getenv("POGO_WORKERS")},
 	}
 	if c.addr == "" {
 		c.addr = ":8080"
@@ -127,9 +131,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	pogoH, err := pogo.New(cfg.pogo, pool, rdb)
+	if err != nil {
+		return err
+	}
 	pushSvc := push.New(pool, sender)
+	pushSvc.DataWorkers = pogoH.Workers() / 2 // cada SendEach leva ~100 ms; o worker do PoGo, ~200 ms por regra
 	hub.Notify = pushSvc.Notify
 	go pushSvc.Run(ctx)
+	go pogoH.Run(ctx, pushSvc)
 
 	go daily(ctx, "auth: limpeza dos refresh", authH.Cleanup)
 	go daily(ctx, "relay: envelopes > 30 dias", hub.Cleanup)
@@ -144,7 +154,10 @@ func run() error {
 	hub.Routes(mux, named)
 	loc.Routes(mux, named)
 	gh.Routes(mux, named)
-	push.NewHandler(pool).Routes(mux, named)
+	pushH := push.NewHandler(pool)
+	pushH.OnToken = pogoH.Enqueue
+	pushH.Routes(mux, named)
+	pogoH.Routes(mux, authH.Authed)
 
 	srv := &http.Server{
 		Addr:              cfg.addr,

@@ -50,8 +50,15 @@ FCM_CREDENTIALS_FILE=/home/<usuário>/pokelocation-secrets/fcm-service-account.j
 GOMEMLIMIT=2GiB
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
+POGO_TOKEN_KEY=<openssl rand -base64 32>
+POGO_WORKERS=8
 BACKUP_PAR_URL=
 ```
+
+`POGO_WORKERS` (1–64) é quantos usuários com alerta do PoGo cada instância atende ao mesmo tempo. Com o log
+`pogo: fila atrasada` aparecendo, aumente no `.env` e recrie só o servidor, sem deploy de código:
+`docker compose up -d server`. Capacidade ≈ workers × 120 s / latência do PoGo usuários a cada 2 min (≈4.800 com 8 e
+200 ms); mais workers = mais pressão no PoGo.
 
 Os `.so.gz` da libsignal são reserva do download do GitHub: copie `tools/libsignal/out/0.86.5` do repo do app para
 `/opt/pokelocation-static/libsignal-0.86.5/`.

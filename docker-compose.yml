@@ -35,6 +35,8 @@ services:
       GOMEMLIMIT: ${GOMEMLIMIT:-1GiB}
       LOG_REQUESTS: ${LOG_REQUESTS:-}
       FCM_CREDENTIALS: ${FCM_CREDENTIALS:-}
+      POGO_TOKEN_KEY: ${POGO_TOKEN_KEY:-}
+      POGO_WORKERS: ${POGO_WORKERS:-}
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_started}
