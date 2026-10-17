@@ -218,6 +218,10 @@ func TestWorker(t *testing.T) {
 	want := map[string]string{"t": "p", "n": "Dratini", "iv": "100", "cp": "512", "d": fmt.Sprint(despawn.UnixMilli()),
 		"r": "Perto", "rc": "rc1", "e": "n1", "id": "147", "f": "Alola", "c": "12",
 		"la": "0.00100", "lo": "0.00000", "v": "0", "lv": "30"}
+	if first.Fields["h"] == "" {
+		t.Fatalf("aviso sem o id do histórico: %v", first.Fields)
+	}
+	delete(first.Fields, "h")
 	if fmt.Sprint(first.Fields) != fmt.Sprint(want) || first.TTL != despawn.Sub(start) {
 		t.Fatalf("aviso: %+v", first)
 	}
@@ -483,6 +487,9 @@ func TestPushQueueFull(t *testing.T) {
 	drain(t, newWorker(h.svc, h.q, ps))
 	if err := h.q.rdb.ZScore(context.Background(), seenKey(u), "x1").Err(); err != redis.Nil {
 		t.Fatal("ficou marcado como visto sem aviso")
+	}
+	if countNotifs(t, pool, u) != 0 {
+		t.Fatal("aviso que não saiu ficou no histórico")
 	}
 	if _, ok := score(t, h.q.rdb, u); !ok {
 		t.Fatal("saiu da fila")
