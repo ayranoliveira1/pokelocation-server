@@ -35,7 +35,9 @@ type Handler struct {
 	workers  int
 	interval time.Duration
 
-	login, me, lookup, search, reveal, trainer, trainerLookup, trainerConfirm, rules *ratelimit.Limiter
+	login, me, lookup, search, reveal, trainer, trainerLookup, trainerConfirm, rules, catalog, icon, iconAll *ratelimit.Limiter
+
+	assets *assets
 }
 
 func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
@@ -49,6 +51,10 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		trainerLookup:  ratelimit.NewWindow(25, time.Hour),
 		trainerConfirm: ratelimit.NewWindow(25, time.Hour),
 		rules:          ratelimit.New(30),
+		catalog:        ratelimit.New(catalogPerMin),
+		icon:           ratelimit.New(iconPerMin),
+		iconAll:        ratelimit.NewWindow(iconAllPerHour, time.Hour),
+		assets:         newAssets(),
 	}
 	h.workers, h.interval = defaultWorkers, defaultInterval
 	if cfg.AlertInterval != "" {
@@ -105,6 +111,8 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	route("GET /v1/pogo/trainer", h.trainer, proxyWait, h.proxy("/trainer", 64<<10, false))
 	route("POST /v1/pogo/trainer/lookup", h.trainerLookup, trainerWait, h.proxy("/trainer/lookup", 64<<10, false))
 	route("POST /v1/pogo/trainer/confirm", h.trainerConfirm, trainerWait, h.confirmTrainer)
+	route("GET /v1/pogo/catalog", h.catalog, proxyWait, h.getCatalog)
+	route("GET /v1/pogo/icon/{src}/{file}", nil, iconWait, h.getIcon) // o limite conta só o que vai ao GitHub
 	route("GET /v1/pogo/rules", h.rules, reqWait, h.listRules)
 	route("POST /v1/pogo/rules", h.rules, reqWait, h.createRule)
 	route("PUT /v1/pogo/rules/{id}", h.rules, reqWait, h.updateRule)

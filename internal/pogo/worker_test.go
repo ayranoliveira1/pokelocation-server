@@ -125,7 +125,7 @@ func TestWorker(t *testing.T) {
 	var near []string
 	for i := 1; i <= 8; i++ {
 		near = append(near, fmt.Sprintf(`{"encounter_id":"n%d","reveal_code":"rc%d","pokemon_name":"Dratini","cp":512,
-			"pokemon_id":147,"form":"Alola","costume":12,
+			"pokemon_id":147,"form":"Alola","costume":12,"level":30,"despawn_verified":false,
 			"iv_percent":100,"despawn_at_ms":%d,"apx_lat":%f,"apx_long":0}`, i, i, despawn.UnixMilli(), 0.001*float64(i)))
 	}
 	near = append(near,
@@ -135,7 +135,7 @@ func TestWorker(t *testing.T) {
 	lookupBody := `{"mode":"pokemon","results":[` + strings.Join(near, ",") + `]}`
 	searchBody := `{"results":[{"encounter_id":"n1","reveal_code":"rc1","pokemon_name":"Dratini"},
 		{"encounter_id":"w1","reveal_code":"rcw","pokemon_name":"Gible","pokemon_id":443,"form":null,"costume":null,
-		"cp":900.5,"iv_percent":97.8,
+		"cp":900.5,"iv_percent":97.8,"level":25.5,"location":"Paris, FR","despawn_verified":true,
 		"despawn_at":"` + despawn.UTC().Format(time.RFC3339) + `","shiny":true}],"tier":"logged_in","cap":10}`
 
 	var mu sync.Mutex
@@ -216,16 +216,20 @@ func TestWorker(t *testing.T) {
 	}
 	first := pa.msgs[0]
 	want := map[string]string{"t": "p", "n": "Dratini", "iv": "100", "cp": "512", "d": fmt.Sprint(despawn.UnixMilli()),
-		"r": "Perto", "rc": "rc1", "e": "n1", "id": "147", "f": "Alola", "c": "12"}
-	if fmt.Sprint(first.Fields) != fmt.Sprint(want) || first.Collapse != "p:"+r1 || first.TTL != despawn.Sub(start) {
+		"r": "Perto", "rc": "rc1", "e": "n1", "id": "147", "f": "Alola", "c": "12",
+		"la": "0.00100", "lo": "0.00000", "v": "0", "lv": "30"}
+	if fmt.Sprint(first.Fields) != fmt.Sprint(want) || first.TTL != despawn.Sub(start) {
 		t.Fatalf("aviso: %+v", first)
 	}
 	gible := pa.msgs[5]
-	if _, f := gible.Fields["f"]; f || gible.Fields["id"] != "443" {
-		t.Fatalf("forma null virou campo: %v", gible.Fields)
+	for _, k := range []string{"f", "la", "lo"} {
+		if _, ok := gible.Fields[k]; ok || gible.Fields["id"] != "443" {
+			t.Fatalf("%s ausente virou campo: %v", k, gible.Fields)
+		}
 	}
 	if gible.Fields["e"] != "w1" || gible.Fields["s"] != "1" || gible.Fields["cp"] != "900.5" ||
-		gible.Fields["iv"] != "97.8" || gible.Fields["r"] != "Mundo" || gible.Collapse != "p:"+r2 {
+		gible.Fields["iv"] != "97.8" || gible.Fields["r"] != "Mundo" || gible.Fields["l"] != "Paris, FR" ||
+		gible.Fields["v"] != "1" || gible.Fields["lv"] != "25.5" {
 		t.Fatalf("mundo: %+v", gible)
 	}
 	mu.Lock()
@@ -412,6 +416,22 @@ func TestQueue(t *testing.T) {
 	if fmt.Sprint(picked) != "[0 1]" || rdb.ZCard(ctx, seenKey(u)).Val() != 2 {
 		t.Fatalf("depois do despawn: %v, %d no ZSET", picked, rdb.ZCard(ctx, seenKey(u)).Val())
 	}
+	// avistado de novo: o já visto estende (só para mais tarde) sem gastar o limite nem avisar
+	t1 := t0.Add(150 * time.Second)
+	rdb.PExpire(ctx, seenKey(u), time.Second)
+	picked, _ = q.markSeen(ctx, cs[0], 1, t1, []string{"a 600000 x 1000 y 60000"})
+	if fmt.Sprint(picked) != "[2]" ||
+		rdb.ZScore(ctx, seenKey(u), "a").Val() != float64(t1.Add(10*time.Minute).UnixMilli()) ||
+		rdb.ZScore(ctx, seenKey(u), "x").Val() != float64(t0.Add(3*time.Minute).UnixMilli()) {
+		t.Fatalf("extensão: %v %v", picked, rdb.ZRangeWithScores(ctx, seenKey(u), 0, -1).Val())
+	}
+	rdb.PExpire(ctx, seenKey(u), time.Second)
+	if picked, _ = q.markSeen(ctx, cs[0], 1, t1, []string{"a 60000"}); len(picked) != 0 {
+		t.Fatalf("só extensão avisou: %v", picked)
+	}
+	if ttl := rdb.PTTL(ctx, seenKey(u)).Val(); ttl <= maxSeen-time.Minute {
+		t.Fatalf("só extensão não renovou a chave: %v", ttl)
+	}
 	if err := q.remove(ctx, cs[0].user); err != nil || rdb.Exists(ctx, leaseKey(cs[0].user)).Val() != 0 {
 		t.Fatalf("remove: %v", err)
 	}
@@ -469,20 +489,109 @@ func TestPushQueueFull(t *testing.T) {
 	}
 }
 
+// Só Pokémon novo: o mesmo spawn não avisa de novo enquanto continua listado, nem com o despawn estimado que passa e
+// volta corrigido, nem sem despawn por mais de 1 h.
+func TestSeenWhileListed(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	var mu sync.Mutex
+	var results string
+	up := http.NewServeMux()
+	up.HandleFunc("POST /search", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = io.WriteString(w, `{"results":[`+results+`]}`)
+	})
+	h := newHandler(t, pool, fakeUpstream(t, up))
+	fcm := &fakeFCM{}
+	ps := push.New(pool, fcm)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go ps.Run(ctx)
+	u := newUser(t, pool)
+	tok := "f-" + u
+	withDevice(t, pool, u, &tok)
+	link(t, h, u, "t")
+	addRule(t, h, u, `{"name":"a","filters":{},"scope":"world"}`)
+	clk := &clock{t: time.Now().Add(5 * time.Second)}
+	w := newWorker(h.svc, h.q, ps)
+	w.now = clk.now
+	round := func(body string, n int) []pushed {
+		mu.Lock()
+		results = body
+		mu.Unlock()
+		drain(t, w)
+		if n == 0 {
+			time.Sleep(50 * time.Millisecond)
+		}
+		return fcm.take(t, n)
+	}
+	est := func(d time.Duration, verified bool) string {
+		return fmt.Sprintf(`{"encounter_id":"est","reveal_code":"r1","despawn_at_ms":%d,"despawn_verified":%t}`,
+			clk.now().Add(d).UnixMilli(), verified)
+	}
+	const unk = `{"encounter_id":"unk","reveal_code":"r2"}`
+
+	if got := round(est(2*time.Minute, false)+","+unk, 1); len(got) != 1 || len(got[0].msgs) != 2 {
+		t.Fatalf("1ª rodada: %+v", got)
+	}
+	clk.add(defaultInterval + time.Second) // a estimativa passou: o upstream deixa de listar
+	if got := round(unk, 0); len(got) != 0 {
+		t.Fatalf("2ª rodada: %+v", got)
+	}
+	clk.add(defaultInterval + time.Second) // volta com o despawn corrigido
+	if got := round(est(20*time.Minute, true)+","+unk, 0); len(got) != 0 {
+		t.Fatalf("despawn corrigido avisou de novo: %+v", got)
+	}
+	for range 20 { // ~1 h a mais, ainda listado sem despawn
+		clk.add(defaultInterval + time.Second)
+		if got := round(unk, 0); len(got) != 0 {
+			t.Fatalf("sem despawn avisou de novo: %+v", got)
+		}
+	}
+	clk.add(defaultInterval + time.Second)
+	if got := round(`{"encounter_id":"novo","reveal_code":"r3"},`+unk, 1); len(got) != 1 || len(got[0].msgs) != 1 ||
+		got[0].msgs[0].Fields["e"] != "novo" {
+		t.Fatalf("spawn novo: %+v", got)
+	}
+}
+
+func TestSeenTTL(t *testing.T) {
+	now := time.Now()
+	no, yes := false, true
+	for _, c := range []struct {
+		despawn  time.Time
+		verified *bool
+		want     time.Duration
+	}{
+		{time.Time{}, nil, unknownTTL},
+		{now.Add(5 * time.Minute), nil, 6 * time.Minute},
+		{now.Add(5 * time.Minute), &yes, 6 * time.Minute},
+		{now.Add(5 * time.Minute), &no, unknownTTL},
+		{now.Add(90 * time.Minute), &no, 91 * time.Minute},
+		{now.Add(5 * time.Hour), &no, maxSeen},
+	} {
+		if got := seenTTL(&mon{despawn: c.despawn, Verified: c.verified}, now); got != c.want {
+			t.Errorf("%v %v: %v, queria %v", c.despawn.Sub(now), c.verified, got, c.want)
+		}
+	}
+}
+
 // O Unmarshal reaproveita a fatia de rascunho sem zerar: o shiny (e o cp) de um item não podem vazar para o próximo.
 func TestMatchesReuse(t *testing.T) {
 	w, sc := &worker{}, &scratch{}
 	r := &dueRule{Scope: "world"}
 	now := time.Now()
 	w.matches(r, []byte(`{"results":[{"encounter_id":"a","reveal_code":"r","shiny":true,"cp":10,"despawn_at_ms":1,
-		"pokemon_id":25,"form":"Alola","costume":3}]}`), time.UnixMilli(0), sc)
+		"pokemon_id":25,"form":"Alola","costume":3,"apx_lat":1,"apx_long":1,"location":"x","despawn_verified":false,
+		"level":20}]}`), time.UnixMilli(0), sc)
 	sc.cands = sc.cands[:0]
 	w.matches(r, []byte(`{"results":[{"encounter_id":"b","reveal_code":"r"}]}`), now, sc)
 	if len(sc.cands) != 1 || sc.cands[0].Shiny || sc.cands[0].CP != nil || sc.cands[0].DespawnMs != 0 {
 		t.Fatalf("vazou: %+v", sc.cands)
 	}
 	d := w.data(r, &sc.cands[0], now)
-	for _, k := range []string{"s", "id", "f", "c"} {
+	for _, k := range []string{"s", "id", "f", "c", "la", "lo", "l", "v", "lv"} {
 		if _, ok := d.Fields[k]; ok {
 			t.Fatalf("%s vazou: %v", k, d.Fields)
 		}

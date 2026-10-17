@@ -338,7 +338,7 @@ func (sc *scratch) group(from int, now time.Time) {
 		m := &sc.cands[i]
 		sc.pack = append(sc.pack, m.Encounter...)
 		sc.pack = append(sc.pack, ' ')
-		sc.pack = strconv.AppendInt(sc.pack, seenTTL(m.despawn, now).Milliseconds(), 10)
+		sc.pack = strconv.AppendInt(sc.pack, seenTTL(m, now).Milliseconds(), 10)
 		sc.pack = append(sc.pack, ' ')
 	}
 	sc.counts = append(sc.counts, len(sc.cands)-from)
@@ -466,6 +466,9 @@ type mon struct {
 	Lat       float64  `json:"apx_lat"` // o /map/lookup sempre manda; o /search não, mas lá não há raio
 	Lng       float64  `json:"apx_long"`
 	Shiny     bool     `json:"shiny"`
+	Verified  *bool    `json:"despawn_verified"`
+	Location  string   `json:"location"` // só o /search
+	Level     float64  `json:"level"`
 	despawn   time.Time
 }
 
@@ -511,15 +514,20 @@ func distKm(lat1, lng1, lat2, lng2 float64) float64 {
 	return 2 * r * math.Asin(math.Sqrt(a))
 }
 
-func seenTTL(despawn, now time.Time) time.Duration {
-	if despawn.IsZero() {
+// Estimado: segura ao menos unknownTTL, para não reavisar se passar e voltar corrigido.
+func seenTTL(m *mon, now time.Time) time.Duration {
+	if m.despawn.IsZero() {
 		return unknownTTL
 	}
-	return min(despawn.Sub(now)+time.Minute, maxSeen)
+	ttl := min(m.despawn.Sub(now)+time.Minute, maxSeen)
+	if m.Verified != nil && !*m.Verified {
+		ttl = max(ttl, unknownTTL)
+	}
+	return ttl
 }
 
 func (w *worker) data(r *dueRule, m *mon, now time.Time) push.Data {
-	f := make(map[string]string, 13) // todas as chaves: sem crescer o map no meio
+	f := make(map[string]string, 18) // todas as chaves: sem crescer o map no meio
 	f["t"], f["n"], f["iv"], f["cp"], f["d"] = "p", m.Name, num(m.IV), num(m.CP), ""
 	f["r"], f["rc"], f["e"] = r.Name, m.Reveal, string(m.Encounter)
 	ttl := unknownTTL
@@ -540,7 +548,22 @@ func (w *worker) data(r *dueRule, m *mon, now time.Time) push.Data {
 	if m.Costume != "" {
 		f["c"] = string(m.Costume)
 	}
-	return push.Data{Fields: f, Collapse: "p:" + r.ID, TTL: ttl}
+	if m.Lat != 0 || m.Lng != 0 {
+		f["la"], f["lo"] = strconv.FormatFloat(m.Lat, 'f', 5, 64), strconv.FormatFloat(m.Lng, 'f', 5, 64)
+	}
+	if m.Location != "" {
+		f["l"] = m.Location
+	}
+	if m.Verified != nil {
+		f["v"] = "0"
+		if *m.Verified {
+			f["v"] = "1"
+		}
+	}
+	if m.Level > 0 {
+		f["lv"] = strconv.FormatFloat(m.Level, 'f', -1, 64)
+	}
+	return push.Data{Fields: f, TTL: ttl}
 }
 
 func num(v *float64) string {
