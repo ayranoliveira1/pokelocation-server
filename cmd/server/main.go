@@ -1,5 +1,5 @@
 // Servidor do PokeLocation: API REST e WebSocket num binário só, configurado por variáveis de ambiente (README).
-// HTTP puro na rede interna: o TLS fica no Caddy.
+// HTTP puro na rede interna: o TLS fica no proxy da frente (nginx em prod, Caddy no local).
 package main
 
 import (

@@ -22,7 +22,7 @@ import (
 )
 
 // Carga da fila: POGO_LOAD=<usuários> (ex.: 10000), uma regra near cada, PoGo falso com POGO_LOAD_MS (200) de
-// latência e POGO_WORKERS (8) workers. Uma passada completa: vazão, atraso da fila (p50/p99), tempo por usuário, idas ao Redis e alocações.
+// latência e POGO_WORKERS (32) workers. Uma passada completa: vazão, atraso da fila (p50/p99), tempo por usuário, idas ao Redis e alocações.
 //
 //	POGO_LOAD=10000 tools/gtest.sh -run TestQueueLoad -v -timeout 30m ./internal/pogo/
 func TestQueueLoad(t *testing.T) {

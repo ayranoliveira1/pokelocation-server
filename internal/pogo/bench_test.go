@@ -240,8 +240,8 @@ func (f *benchFCM) SendData(_ context.Context, _, _ string, m []push.Data) error
 	return nil
 }
 
-// Uma passada da fila por todos os usuários (o equivalente à rodada antiga): users usuários, rules regras cada
-// (metade near, metade world), atendidos pelo pool real (8 workers).
+// Uma passada da fila por todos os usuários: users usuários, rules regras cada (metade near, metade world),
+// atendidos pelo pool real.
 func BenchmarkWorkerRound(b *testing.B) {
 	for _, c := range []struct {
 		users, rules int
