@@ -30,7 +30,6 @@ const (
 	numResults      = 100
 	maxSeen         = 2 * time.Hour
 	unknownTTL      = time.Hour
-	// todas as regras no timeout; o lease passa disso, então não precisa de heartbeat
 	// teto do tempo de um usuário: 10 regras no prazo de 30 s = 5 min; o lease passa disso, então não precisa de
 	// heartbeat (só pesa quando uma instância cai no meio: o usuário volta em até 5,5 min)
 	userWait     = maxRules * lookupWait

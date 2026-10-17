@@ -1,5 +1,5 @@
-// Gerador de carga do protocolo WS real: latência ponta a ponta, perdas, RSS e CPU do servidor contra as metas da
-// spec. Roteiro e flags em loadtest/README.md. O -url padrão usa 127.0.0.1 e ::1 porque o macOS tem ~16 mil portas
+// Gerador de carga do protocolo WS real: latência ponta a ponta, perdas, RSS e CPU do servidor contra as metas.
+// Roteiro, metas e flags em loadtest/README.md. O -url padrão usa 127.0.0.1 e ::1 porque o macOS tem ~16 mil portas
 // efêmeras por destino.
 package main
 

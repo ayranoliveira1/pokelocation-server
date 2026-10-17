@@ -345,7 +345,7 @@ type shinyFilters struct {
 func (f *shinyFilters) any() bool { return f.ShinyOnly || f.BackgroundOnly || f.ShinyAccount != "" }
 
 // wantsShiny: no /search os filtros vêm no topo, no /map/lookup dentro de filters. Corpo que não lê como esperado
-// conta como shiny: vai com o token do usuário, como antes dos tokens do servidor.
+// conta como shiny: vai com o token do usuário.
 func wantsShiny(body []byte) bool {
 	if len(body) == 0 {
 		return false

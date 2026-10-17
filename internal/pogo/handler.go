@@ -82,7 +82,7 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 	return h, err
 }
 
-// Workers: POGO_WORKERS validado (padrão 8).
+// Workers: POGO_WORKERS validado (padrão 32).
 func (h *Handler) Workers() int { return h.workers }
 
 // Enqueue põe o usuário na fila dos alertas (regra ligada, token FCM novo). Quem não deve estar lá sai na
