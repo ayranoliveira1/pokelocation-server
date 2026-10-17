@@ -18,7 +18,6 @@ import (
 	"github.com/ayranoliveira1/pokelocation-server/internal/testdb"
 )
 
-// failFCM recusa só a 1ª mensagem de cada lote.
 type failFCM struct{ fakeFCM }
 
 func (f *failFCM) SendData(ctx context.Context, user, token string, msgs []push.Data) error {
@@ -41,7 +40,6 @@ func listPage(t *testing.T, h *Handler, user, query string) page {
 	return p
 }
 
-// alertSetup: um usuário com regra no mundo e o /search devolvendo n Pokémon novos a cada chamada.
 func alertSetup(t *testing.T, pool *pgxpool.Pool, sender push.Sender) (*Handler, *worker, string, func(n int)) {
 	t.Helper()
 	var mu sync.Mutex
