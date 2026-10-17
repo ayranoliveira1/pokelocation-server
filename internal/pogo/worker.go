@@ -97,6 +97,7 @@ func (h *Handler) Run(ctx context.Context, p *push.Service) {
 	}
 	w := newWorker(h.svc, h.q, p)
 	w.workers, w.interval = h.workers, h.interval
+	go w.cleanup(ctx)
 	w.run(ctx)
 }
 
@@ -367,7 +368,15 @@ func (w *worker) notify(ctx context.Context, c claim, rules []dueRule, fcm strin
 		}
 		msgs = append(msgs, w.data(&rules[ruleOf], &sc.cands[p], now))
 	}
+	// gravado antes do envio para o push já levar o id; sem o histórico, o aviso sai mesmo assim
+	if err := w.svc.store.record(ctx, c.user, msgs); err != nil {
+		slog.Warn("pogo: histórico", "err_type", fmt.Sprintf("%T", err))
+		for _, m := range msgs {
+			delete(m.Fields, "h")
+		}
+	}
 	if !w.push.TryPush(c.user, fcm, msgs) {
+		_ = w.svc.store.forget(ctx, c.user, msgs)
 		ids := make([]any, len(picked))
 		for i, p := range picked {
 			ids[i] = string(sc.cands[p].Encounter)

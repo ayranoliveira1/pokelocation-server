@@ -2,6 +2,7 @@ package pogo
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -29,7 +30,7 @@ func TestIndices(t *testing.T) {
 
 func TestIndicesSeed(t *testing.T) { checkIndices(t, testdb.Seed(t)) }
 
-// qUpsertAccount e qInsertRule ficam de fora: INSERT de VALUES não lê tabela (o ON CONFLICT usa a PK).
+// qUpsertAccount, qInsertRule e qInsertNotif ficam de fora: INSERT de VALUES não lê tabela (o ON CONFLICT usa a PK).
 func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 	s := testdb.SampleOf(t, pool)
 	enc := []byte{1}
@@ -47,6 +48,14 @@ func checkIndices(t *testing.T, pool *pgxpool.Pool) {
 		"pogo_rules_enabled")
 	testdb.RequireIndex(t, pool, qTrainers, []any{s.User}, "pogo_accounts_pkey")
 	testdb.RequireIndex(t, pool, qUpdateTrainers, []any{s.User, enc, []byte(`[]`)}, "pogo_accounts_pkey")
+	testdb.RequireIndex(t, pool, qTrimNotifs, []any{s.User, maxNotifs}, "pogo_notifications_user")
+	testdb.RequireIndexNoSort(t, pool, qListNotifs, []any{s.User, int64(1 << 62), pageMax}, "pogo_notifications_user")
+	testdb.RequireIndex(t, pool, qDeleteNotif, []any{int64(1), s.User}, "pogo_notifications_pkey",
+		"pogo_notifications_user")
+	testdb.RequireIndex(t, pool, qDeleteNotifs, []any{s.User}, "pogo_notifications_user")
+	testdb.RequireIndex(t, pool, qForgetNotifs, []any{[]int64{1}, s.User}, "pogo_notifications_pkey",
+		"pogo_notifications_user")
+	testdb.RequireIndex(t, pool, qExpiredNotifs, []any{time.Now()}, "pogo_notifications_created")
 	for _, idx := range []string{"pogo_accounts_pkey", "devices_pkey", "pogo_rules_enabled"} {
 		testdb.RequireIndexNoSort(t, pool, qUserRules, []any{s.User}, idx)
 	}

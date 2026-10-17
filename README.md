@@ -15,6 +15,8 @@ Go 1.27, um binário só (REST + WebSocket), PostgreSQL e Redis. TLS pelo Caddy 
 - **Tokens do servidor em rodízio:** lookup, search, reveal e alertas sem shiny funcionam sem o usuário vincular
   conta. Token recusado sai do rodízio por 5 min.
 - **Alertas por push** com foto, forma e costume do Pokémon; shiny só com treinador vinculado.
+- **Histórico dos alertas** (`GET`/`DELETE /v1/pogo/notifications`, paginado por cursor): guarda os avisos que o FCM
+  aceitou, até 200 por usuário e por 7 dias; o push leva em `h` o id do item.
 - **PoGo lento:** espera até 30 s em lookup e search, depois responde `504 upstream_timeout`.
 - **Limites** por IP no nginx (login mais apertado) e por usuário nas rotas autenticadas.
 

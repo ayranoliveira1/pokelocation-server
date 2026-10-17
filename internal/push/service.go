@@ -27,6 +27,15 @@ const (
 
 var ErrInvalidToken = errors.New("push: token inválido")
 
+// FailedMsgs: o FCM recusou só estas mensagens do lote (índices em msgs); as outras foram entregues.
+type FailedMsgs struct {
+	Idx []int
+	Err error
+}
+
+func (e *FailedMsgs) Error() string { return e.Err.Error() }
+func (e *FailedMsgs) Unwrap() error { return e.Err }
+
 type Sender interface {
 	Send(ctx context.Context, user, token string) error
 	SendData(ctx context.Context, user, token string, msgs []Data) error
@@ -41,13 +50,15 @@ type Data struct {
 type Service struct {
 	// DataWorkers: envios com dados em paralelo (padrão 4). Definido antes do Run; acompanha quem produz (POGO_WORKERS).
 	DataWorkers int
-	store       *Store
-	sender      Sender
-	mu          sync.Mutex
-	pending     map[string]struct{}
-	wake        chan struct{}
-	data        chan dataJob
-	queued      atomic.Int64 // mensagens em data
+	// DataFailed, se não for nil, recebe os avisos com dados que o FCM não aceitou. Definido antes do Run.
+	DataFailed func(user string, msgs []Data)
+	store      *Store
+	sender     Sender
+	mu         sync.Mutex
+	pending    map[string]struct{}
+	wake       chan struct{}
+	data       chan dataJob
+	queued     atomic.Int64 // mensagens em data
 }
 
 type dataJob struct {
@@ -80,9 +91,12 @@ func (s *Service) Run(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case j := <-s.data:
-					s.deliver(ctx, j.t, func(ctx context.Context) error {
+					err := s.deliver(ctx, j.t, func(ctx context.Context) error {
 						return s.sender.SendData(ctx, j.t.User, j.t.Token, j.msgs)
 					})
+					if err != nil && s.DataFailed != nil {
+						s.DataFailed(j.t.User, failedOf(j.msgs, err))
+					}
 					s.queued.Add(-int64(len(j.msgs)))
 				}
 			}
@@ -136,7 +150,19 @@ func (s *Service) pushBatch(ctx context.Context, users []string) {
 }
 
 func (s *Service) send(ctx context.Context, t target) {
-	s.deliver(ctx, t, func(ctx context.Context) error { return s.sender.Send(ctx, t.User, t.Token) })
+	_ = s.deliver(ctx, t, func(ctx context.Context) error { return s.sender.Send(ctx, t.User, t.Token) })
+}
+
+func failedOf(msgs []Data, err error) []Data {
+	var fm *FailedMsgs
+	if !errors.As(err, &fm) {
+		return msgs
+	}
+	out := make([]Data, 0, len(fm.Idx))
+	for _, i := range fm.Idx {
+		out = append(out, msgs[i])
+	}
+	return out
 }
 
 // TryPush enfileira sem bloquear, para o token que quem chama já leu; false = fila cheia, nada foi enfileirado.
@@ -155,7 +181,7 @@ func (s *Service) TryPush(user, token string, msgs []Data) bool {
 	}
 }
 
-func (s *Service) deliver(ctx context.Context, t target, send func(context.Context) error) {
+func (s *Service) deliver(ctx context.Context, t target, send func(context.Context) error) error {
 	sctx, cancel := context.WithTimeout(ctx, sendWait)
 	err := send(sctx)
 	cancel()
@@ -167,6 +193,7 @@ func (s *Service) deliver(ctx context.Context, t target, send func(context.Conte
 	case err != nil:
 		slog.Warn("push: fcm", "err_type", fmt.Sprintf("%T", err)) // a mensagem da lib pode trazer o token
 	}
+	return err
 }
 
 // logSender loga só o usuário, nunca o token.

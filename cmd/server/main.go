@@ -152,6 +152,7 @@ func run() error {
 	}
 	pushSvc := push.New(pool, sender)
 	pushSvc.DataWorkers = pogoH.Workers() / 2 // cada SendEach leva ~100 ms, bem abaixo dos segundos de cada regra no PoGo
+	pushSvc.DataFailed = pogoH.Unsent
 	hub.Notify = pushSvc.Notify
 	go pushSvc.Run(ctx)
 	go pogoH.Run(ctx, pushSvc)

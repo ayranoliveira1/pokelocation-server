@@ -49,10 +49,17 @@ func (f fcmSender) SendData(ctx context.Context, _, token string, msgs []Data) e
 	if err != nil {
 		return fcmErr(err)
 	}
-	for _, r := range br.Responses {
-		err = errors.Join(err, fcmErr(r.Error))
+	var failed FailedMsgs
+	for i, r := range br.Responses {
+		if r.Error != nil {
+			failed.Idx = append(failed.Idx, i)
+			failed.Err = errors.Join(failed.Err, fcmErr(r.Error))
+		}
 	}
-	return err
+	if failed.Err == nil {
+		return nil
+	}
+	return &failed
 }
 
 // InvalidArgument pode ser erro nosso de formato: tratá-lo como token inválido apagaria todos os tokens.

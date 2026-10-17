@@ -35,7 +35,7 @@ type Handler struct {
 	workers  int
 	interval time.Duration
 
-	login, me, lookup, search, reveal, trainer, trainerLookup, trainerConfirm, rules, catalog, icon, iconAll *ratelimit.Limiter
+	login, me, lookup, search, reveal, trainer, trainerLookup, trainerConfirm, rules, notifs, catalog, icon, iconAll *ratelimit.Limiter
 
 	assets *assets
 }
@@ -51,6 +51,7 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		trainerLookup:  ratelimit.NewWindow(25, time.Hour),
 		trainerConfirm: ratelimit.NewWindow(25, time.Hour),
 		rules:          ratelimit.New(30),
+		notifs:         ratelimit.New(60),
 		catalog:        ratelimit.New(catalogPerMin),
 		icon:           ratelimit.New(iconPerMin),
 		iconAll:        ratelimit.NewWindow(iconAllPerHour, time.Hour),
@@ -117,6 +118,9 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	route("POST /v1/pogo/rules", h.rules, reqWait, h.createRule)
 	route("PUT /v1/pogo/rules/{id}", h.rules, reqWait, h.updateRule)
 	route("DELETE /v1/pogo/rules/{id}", h.rules, reqWait, h.deleteRule)
+	route("GET /v1/pogo/notifications", h.notifs, reqWait, h.listNotifications)
+	route("DELETE /v1/pogo/notifications", h.notifs, reqWait, h.deleteNotifications)
+	route("DELETE /v1/pogo/notifications/{id}", h.notifs, reqWait, h.deleteNotification)
 }
 
 func (h *Handler) guard(lim *ratelimit.Limiter, next http.HandlerFunc) http.HandlerFunc {
