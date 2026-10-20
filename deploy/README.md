@@ -3,7 +3,8 @@
 Ubuntu 24.04 com Docker e o nginx do sistema nas portas 80/443, que pode ter outros sites e containers. Nada aqui
 mexe neles: sem Caddy, sem portas publicadas além do servidor em `127.0.0.1:8095`, sem `daemon.json` nem restart do
 Docker, e um site novo no nginx em vez de editar os existentes. Domínio
-`pokelocation.waveplay.xyz` com registro A para o IP da VPS na Cloudflare em **DNS only**.
+`pokelocation.waveplay.xyz` com registro A para o IP da VPS na Cloudflare em **Proxied** (SSL/TLS Full): a rota
+direta do Brasil até a VPS perde pacotes, e o nginx lê o IP do cliente no `CF-Connecting-IP`.
 
 ## 1. Código
 
