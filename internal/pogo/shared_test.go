@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ayranoliveira1/pokelocation-server/internal/httpx"
 	"github.com/ayranoliveira1/pokelocation-server/internal/push"
 	"github.com/ayranoliveira1/pokelocation-server/internal/testdb"
 )
@@ -372,4 +373,136 @@ func TestSharedWorkerRefused(t *testing.T) {
 		u, v).Scan(&off); err != nil || off != 0 {
 		t.Fatalf("regras desligadas: %d %v", off, err)
 	}
+}
+
+// Rare Candy: a conta vinculada do usuário primeiro (o cap segue o plano dele), os tokens do servidor de reserva.
+func TestCandy(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	var mu sync.Mutex
+	var seen []string
+	reply := map[string]string{} // token → "status corpo" ou "lento"; sem entrada = 200
+	up := http.NewServeMux()
+	up.HandleFunc("POST /rare-candy/search", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body) // sem ler o corpo, o servidor não percebe o cliente indo embora
+		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		mu.Lock()
+		seen = append(seen, tok)
+		rep := reply[tok]
+		mu.Unlock()
+		if rep == "lento" {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(5 * time.Second):
+			}
+			return
+		}
+		if code, body, ok := strings.Cut(rep, " "); ok {
+			n, _ := strconv.Atoi(code)
+			w.WriteHeader(n)
+			_, _ = io.WriteString(w, body)
+			return
+		}
+		_, _ = io.WriteString(w, `{"results":[],"tier":"free","cap":10}`)
+	})
+	upURL := fakeUpstream(t, up)
+	h, err := New(Config{TokenKey: newKey(t), Upstream: upURL, SharedTokens: "s1,s2"}, pool, testdb.Redis(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := func(r map[string]string) {
+		mu.Lock()
+		defer mu.Unlock()
+		reply, seen = r, nil
+		for i := range h.svc.shared {
+			h.svc.shared[i].until.Store(0)
+		}
+	}
+	take := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		s := strings.Join(seen, " ")
+		seen = nil
+		return s
+	}
+	candy := func(h *Handler, user string) *httptest.ResponseRecorder {
+		return serve(h, user, "POST", "/v1/pogo/rare-candy", `{"center_lat":1,"center_lng":2,"radius_km":5}`)
+	}
+	withLink := func() string {
+		u := newUser(t, pool)
+		link(t, h, u, "tu")
+		return u
+	}
+	server := func(got string) bool { return got == "s1" || got == "s2" }
+	const limited = `429 {"detail":{"error":"rate_limited","retry_after":46}}`
+
+	t.Run("vinculado", func(t *testing.T) {
+		set(nil)
+		w := candy(h, withLink())
+		if got := take(); w.Code != 200 || got != "tu" {
+			t.Fatal(w.Code, got)
+		}
+	})
+	t.Run("sem vínculo", func(t *testing.T) {
+		set(nil)
+		w := candy(h, newUser(t, pool))
+		if got := take(); w.Code != 200 || !server(got) {
+			t.Fatal(w.Code, got)
+		}
+	})
+	t.Run("429 na conta dele", func(t *testing.T) {
+		set(map[string]string{"tu": limited})
+		w := candy(h, withLink())
+		if got := take(); w.Code != 200 || !strings.HasPrefix(got, "tu ") || !server(got[3:]) {
+			t.Fatal(w.Code, got)
+		}
+	})
+	t.Run("401 na conta dele", func(t *testing.T) {
+		set(map[string]string{"tu": `401 {}`})
+		u := withLink()
+		w := candy(h, u)
+		if got := take(); w.Code != 200 || !strings.HasPrefix(got, "tu ") || !server(got[3:]) {
+			t.Fatal(w.Code, got)
+		}
+		if linked(t, pool, u) {
+			t.Fatal("401 não apagou o vínculo")
+		}
+	})
+	t.Run("servidor recusado com vínculo", func(t *testing.T) {
+		set(map[string]string{"tu": limited, "s1": `402 {}`, "s2": `402 {}`})
+		w := candy(h, withLink())
+		if got := take(); w.Code != 429 || w.Header().Get("Retry-After") != "46" || len(strings.Fields(got)) != 3 {
+			t.Fatal(w.Code, w.Body.String(), got)
+		}
+	})
+	t.Run("servidor recusado sem vínculo", func(t *testing.T) {
+		set(map[string]string{"s1": `402 {}`, "s2": `402 {}`})
+		wantError(t, candy(h, newUser(t, pool)), 502, "upstream_unavailable")
+	})
+	t.Run("sem tokens do servidor", func(t *testing.T) {
+		set(nil)
+		wantError(t, candy(newHandler(t, pool, upURL), newUser(t, pool)), 409, "pogo_relogin")
+		if got := take(); got != "" {
+			t.Fatal(got)
+		}
+	})
+	t.Run("prazo estourado", func(t *testing.T) {
+		set(map[string]string{"tu": "lento"})
+		u := withLink()
+		mux := http.NewServeMux()
+		h.Routes(mux, func(next http.HandlerFunc) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				next(w, r.WithContext(httpx.WithUser(r.Context(), u)))
+			})
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		r := httptest.NewRequest("POST", "/v1/pogo/rare-candy", strings.NewReader(`{}`)).WithContext(ctx)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		wantError(t, w, 504, "upstream_timeout")
+		if got := take(); got != "tu" {
+			t.Fatal(got)
+		}
+	})
 }

@@ -45,7 +45,7 @@ type iconSource struct {
 }
 
 type assets struct {
-	icons map[string]iconSource // "pm" e "u": só esses hosts e caminhos
+	icons map[string]iconSource // "pm", "u" e "it": só esses hosts e caminhos
 	hc    *http.Client
 	sf    singleflight.Group
 	mu    sync.Mutex
@@ -62,6 +62,8 @@ func newAssets() *assets {
 				regexp.MustCompile(`^pm[0-9]{1,4}(\.c[A-Za-z0-9_]{1,64})?(\.f[A-Za-z0-9_]{1,64})?(\.s)?\.icon\.png$`)},
 			"u": {"https://raw.githubusercontent.com/nileplumb/PkmnShuffleMap/refs/heads/master/UICONS/pokemon/",
 				regexp.MustCompile(`^[0-9]{1,4}\.png$`)},
+			"it": {"https://raw.githubusercontent.com/nileplumb/PkmnShuffleMap/refs/heads/master/UICONS/reward/item/",
+				regexp.MustCompile(`^1301\.png$`)}, // só a Rare Candy
 		},
 		hc:  &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		lru: newLRU(iconCache),

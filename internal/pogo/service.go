@@ -273,6 +273,21 @@ func (s *Service) search(ctx context.Context, user, method, path string, body []
 	return gzipped, err
 }
 
+// candy: o inverso do search, porque o cap segue o plano da conta que busca; os tokens do servidor são a reserva.
+// Prazo estourado ou pedido cancelado não tem tempo para outra ida. Servidor todo recusado com vínculo: o erro da
+// conta dele (o 429 com retry_after) diz mais que o 502.
+func (s *Service) candy(ctx context.Context, user, method, path string, body []byte, max int64, gz bool, buf *bytes.Buffer) (bool, error) {
+	a, gzipped, err := s.call(ctx, user, method, path, body, max, gz, buf)
+	if err == nil || len(s.shared) == 0 || errors.Is(err, ErrTimeout) || ctx.Err() != nil {
+		return gzipped, err
+	}
+	gzipped, serr := s.callShared(ctx, method, path, body, max, gz, buf)
+	if serr == errSharedRefused && a.enc != nil {
+		return false, err
+	}
+	return gzipped, serr
+}
+
 // callShared roda os tokens do servidor a partir do próximo da vez, pulando os que esfriam; 401, 402 ou 403 (conta do
 // servidor sem acesso) e 429 passam para o seguinte; o 403 de filtro (vale para qualquer token) volta na hora. Nenhum
 // serviu: 429 com o menor tempo até um token voltar, se algum está no limite, senão errSharedRefused.
