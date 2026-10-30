@@ -17,6 +17,8 @@ Go 1.27, um binário só (REST + WebSocket), PostgreSQL e Redis. TLS pelo Caddy 
   estourado (`504`) não tenta de novo. Servidor todo recusado: com vínculo volta o erro da conta dele, sem vínculo
   `502`. Sem `POGO_SHARED_TOKENS`, só a conta do usuário.
 - **Limite:** 10 por minuto por usuário, separado do search.
+- **Ícone da Rare Candy:** `GET /v1/pogo/icon/it/1301.png`, o item do UICONS (`reward/item`) pelo mesmo proxy, cache e
+  limites dos ícones dos Pokémon (`pm` e `u`). A fonte `it` só aceita esse arquivo.
 
 ### v1.1: proxy do PoGo Coordinates (para o app v1.2)
 

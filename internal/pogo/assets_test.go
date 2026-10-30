@@ -174,7 +174,7 @@ func TestIcon(t *testing.T) {
 		calls[r.URL.Path]++
 		mu.Unlock()
 		switch r.URL.Path {
-		case "/pm/pm25.icon.png", "/u/25.png", "/pm/pm19.fALOLA.s.icon.png", "/pm/pm25.cHALLOWEEN_2017.icon.png":
+		case "/pm/pm25.icon.png", "/u/25.png", "/pm/pm19.fALOLA.s.icon.png", "/pm/pm25.cHALLOWEEN_2017.icon.png", "/it/1301.png":
 			_, _ = w.Write(png)
 		case "/pm/pm1.icon.png":
 			_, _ = io.WriteString(w, "<html>")
@@ -201,8 +201,8 @@ func TestIcon(t *testing.T) {
 	if w := get(h, "u", "/v1/pogo/icon/pm/pm25.icon.png", "If-None-Match", etag); w.Code != 304 {
 		t.Fatalf("If-None-Match: %d", w.Code)
 	}
-	for _, p := range []string{"pm/pm19.fALOLA.s.icon.png", "pm/pm25.cHALLOWEEN_2017.icon.png", "u/25.png"} {
-		if w := get(h, "u", "/v1/pogo/icon/"+p); w.Code != 200 {
+	for _, p := range []string{"pm/pm19.fALOLA.s.icon.png", "pm/pm25.cHALLOWEEN_2017.icon.png", "u/25.png", "it/1301.png", "it/1301.png"} {
+		if w := get(h, "u", "/v1/pogo/icon/"+p); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), png) {
 			t.Fatalf("%s: %d", p, w.Code)
 		}
 	}
@@ -219,7 +219,7 @@ func TestIcon(t *testing.T) {
 		}
 	}
 	mu.Lock()
-	for p, want := range map[string]int{"/pm/pm25.icon.png": 1, "/pm/pm25.s.icon.png": 1, "/pm/pm3.icon.png": 2} {
+	for p, want := range map[string]int{"/pm/pm25.icon.png": 1, "/pm/pm25.s.icon.png": 1, "/pm/pm3.icon.png": 2, "/it/1301.png": 1} {
 		if calls[p] != want {
 			t.Errorf("%s: %d idas, queria %d", p, calls[p], want)
 		}
@@ -227,13 +227,14 @@ func TestIcon(t *testing.T) {
 	mu.Unlock()
 
 	for _, p := range []string{"pm/pm25.svg", "pm/x.icon.png", "pm/pm25.cHALLO-WEEN.icon.png", "pm/pm25.icon.png.exe",
-		"pm/%2E%2E", "pm/pm25.c..icon.png", "u/pm25.icon.png", "gh/25.png", "u/25.png%3Fx", "pm/pm12345.icon.png"} {
+		"pm/%2E%2E", "pm/pm25.c..icon.png", "u/pm25.icon.png", "gh/25.png", "u/25.png%3Fx", "pm/pm12345.icon.png",
+		"it/1302.png", "it/..%2Fx", "it/pm25.icon.png"} {
 		if w := get(h, "u", "/v1/pogo/icon/"+p); w.Code != 400 {
 			t.Errorf("%s: %d, queria 400", p, w.Code)
 		}
 	}
 	mu.Lock()
-	if len(calls) != 9 {
+	if len(calls) != 10 {
 		t.Errorf("nome inválido chegou ao upstream: %v", calls)
 	}
 	mu.Unlock()
