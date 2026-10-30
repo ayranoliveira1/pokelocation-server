@@ -17,6 +17,7 @@ import (
 
 	"github.com/ayranoliveira1/pokelocation-server/internal/friends"
 	"github.com/ayranoliveira1/pokelocation-server/internal/httpx"
+	"github.com/ayranoliveira1/pokelocation-server/internal/ratelimit"
 	"github.com/ayranoliveira1/pokelocation-server/internal/testdb"
 )
 
@@ -512,6 +513,7 @@ func TestFetchGroupMember(t *testing.T) {
 // Por quem pede, somando os alvos: 60/min no total; outro usuário não sente.
 func TestFetchRateLimitTotal(t *testing.T) {
 	e := newEnv(t)
+	e.h.byMe = ratelimit.NewWindow(60, time.Hour) // o mesmo teto sem a recarga de 1/s: runner lento não ganha pedido extra
 	me, other := e.user(), e.user()
 	targets := make([]string, 7)
 	for i := range targets {
