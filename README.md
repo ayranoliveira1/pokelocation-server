@@ -8,6 +8,18 @@ Go 1.27, um binário só (REST + WebSocket), PostgreSQL e Redis. TLS pelo Caddy 
 
 ## Versões
 
+### v1.2: Rare Candy
+
+- **`POST /v1/pogo/rare-candy`** (`{"center_lat","center_lng","radius_km"}`): repassa a `/rare-candy/search` do PoGo
+  e devolve a resposta dele como veio (`results`, `tier`, `cap`).
+- **Conta vinculada do usuário primeiro**, porque o `cap` segue o plano da conta que busca. Sem vínculo, ou com a
+  conta dele falhando (401 apaga o vínculo, como nas outras rotas), vai pelos tokens do servidor em rodízio. Prazo
+  estourado (`504`) não tenta de novo. Servidor todo recusado: com vínculo volta o erro da conta dele, sem vínculo
+  `502`. Sem `POGO_SHARED_TOKENS`, só a conta do usuário.
+- **Limite:** 10 por minuto por usuário, separado do search.
+- **Ícone da Rare Candy:** `GET /v1/pogo/icon/it/1301.png`, o item do UICONS (`reward/item`) pelo mesmo proxy, cache e
+  limites dos ícones dos Pokémon (`pm` e `u`). A fonte `it` só aceita esse arquivo.
+
 ### v1.1: proxy do PoGo Coordinates (para o app v1.2)
 
 - **Proxy do PoGo Coordinates** (`/v1/pogo/*`): login, lookup, search, reveal e treinador. O token do PoGo do usuário
@@ -69,7 +81,7 @@ Instale `caddy-local-root.crt` só no emulador; só a build debug do app confia 
 | `POGO_TOKEN_KEY` | vazio = PoGo desligado (`/v1/pogo/*` → 503) | chave AES-256 dos tokens do PoGo Coordinates, 32 bytes em base64 (`openssl rand -base64 32`). Trocar invalida os vínculos (o app pede login de novo) |
 | `POGO_WORKERS` | `32` | alertas do PoGo em paralelo por instância (1–64). Capacidade ≈ workers × intervalo / latência do PoGo, por regra: o PoGo leva 5–15 s por chamada (~7 s típico), então 32 com 3 min ≈ 850 usuários com 1 alerta (≈85 com 10 regras; ≈380 com o PoGo em 15 s), 64 ≈ 1.650. O log `pogo: fila atrasada` avisa quando falta. Mais workers = mais pressão no PoGo |
 | `POGO_ALERT_INTERVAL` | `3m` | de quanto em quanto tempo cada usuário com alerta roda (2m–10m; fora disso a subida falha). Maior = mais usuários por instância, alerta mais tardio |
-| `POGO_SHARED_TOKENS` | vazio = tudo com o token do usuário | tokens do PoGo do servidor, separados por vírgula (exige `POGO_TOKEN_KEY`). Lookup, search, reveal e alertas sem shiny vão por eles em rodízio, sem exigir vínculo; shiny, `/me` e treinador seguem com o token do usuário. Token recusado (401, 402, 403 da conta) fica 5 min fora do rodízio e no 429 até o `retry_after`; 403 de filtro (`vip_required`, `trainer_not_linked`, `shiny_account_unavailable`) volta ao app; todos recusados: com vínculo tenta o token do usuário, sem vínculo 502. Log `pogo: token do servidor recusado` com `pos` (posição na lista, a partir de 0) = token a trocar |
+| `POGO_SHARED_TOKENS` | vazio = tudo com o token do usuário | tokens do PoGo do servidor, separados por vírgula (exige `POGO_TOKEN_KEY`). Lookup, search, reveal e alertas sem shiny vão por eles em rodízio, sem exigir vínculo; rare candy, só de reserva da conta do usuário; shiny, `/me` e treinador seguem com o token do usuário. Token recusado (401, 402, 403 da conta) fica 5 min fora do rodízio e no 429 até o `retry_after`; 403 de filtro (`vip_required`, `trainer_not_linked`, `shiny_account_unavailable`) volta ao app; todos recusados: com vínculo tenta o token do usuário, sem vínculo 502. Log `pogo: token do servidor recusado` com `pos` (posição na lista, a partir de 0) = token a trocar |
 | `POGO_UPSTREAM_URL` | `https://coordinates-api.pokemongopro.com` | só para teste local com um PoGo falso |
 | `LOG_REQUESTS` | vazio = desligado | `1` = log de cada requisição (método, rota sem query, status, ms), só para depurar no local |
 | `PPROF_ADDR` | vazio = desligado | endereço **interno** do pprof (ex.: `127.0.0.1:6060`) |

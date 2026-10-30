@@ -1,6 +1,7 @@
 package pogo
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -35,7 +36,7 @@ type Handler struct {
 	workers  int
 	interval time.Duration
 
-	login, me, lookup, search, reveal, trainer, trainerLookup, trainerConfirm, rules, notifs, catalog, icon, iconAll *ratelimit.Limiter
+	login, me, lookup, search, candy, reveal, trainer, trainerLookup, trainerConfirm, rules, notifs, catalog, icon, iconAll *ratelimit.Limiter
 
 	assets *assets
 }
@@ -46,6 +47,7 @@ func New(cfg Config, pool *pgxpool.Pool, rdb *redis.Client) (*Handler, error) {
 		me:             ratelimit.New(10),
 		lookup:         ratelimit.New(30),
 		search:         ratelimit.New(10),
+		candy:          ratelimit.New(10),
 		reveal:         ratelimit.New(30),
 		trainer:        ratelimit.New(10),
 		trainerLookup:  ratelimit.NewWindow(25, time.Hour),
@@ -106,11 +108,12 @@ func (h *Handler) Routes(mux *http.ServeMux, authed func(http.HandlerFunc) http.
 	route("POST /v1/pogo/login", h.login, proxyWait, h.postLogin)
 	route("DELETE /v1/pogo/login", nil, reqWait, h.deleteLogin)
 	route("GET /v1/pogo/me", h.me, proxyWait, h.getMe)
-	route("POST /v1/pogo/lookup", h.lookup, lookupWait, h.proxy("/map/lookup", 1<<20, true))
-	route("POST /v1/pogo/search", h.search, lookupWait, h.proxy("/search", 256<<10, true))
+	route("POST /v1/pogo/lookup", h.lookup, lookupWait, h.proxy("/map/lookup", 1<<20, (*Service).search))
+	route("POST /v1/pogo/search", h.search, lookupWait, h.proxy("/search", 256<<10, (*Service).search))
+	route("POST /v1/pogo/rare-candy", h.candy, lookupWait, h.proxy("/rare-candy/search", 64<<10, (*Service).candy))
 	route("GET /v1/pogo/reveal/{code}", h.reveal, proxyWait, h.getReveal)
-	route("GET /v1/pogo/trainer", h.trainer, proxyWait, h.proxy("/trainer", 64<<10, false))
-	route("POST /v1/pogo/trainer/lookup", h.trainerLookup, trainerWait, h.proxy("/trainer/lookup", 64<<10, false))
+	route("GET /v1/pogo/trainer", h.trainer, proxyWait, h.proxy("/trainer", 64<<10, nil))
+	route("POST /v1/pogo/trainer/lookup", h.trainerLookup, trainerWait, h.proxy("/trainer/lookup", 64<<10, nil))
 	route("POST /v1/pogo/trainer/confirm", h.trainerConfirm, trainerWait, h.confirmTrainer)
 	route("GET /v1/pogo/catalog", h.catalog, proxyWait, h.getCatalog)
 	route("GET /v1/pogo/icon/{src}/{file}", nil, iconWait, h.getIcon) // o limite conta só o que vai ao GitHub
@@ -195,18 +198,21 @@ func (h *Handler) getReveal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	h.forward(w, r, "GET", "/reveal/"+url.PathEscape(code), nil, 16<<10, true)
+	h.forward(w, r, "GET", "/reveal/"+url.PathEscape(code), nil, 16<<10, (*Service).search)
 }
 
-// proxy: GET sem corpo; POST com um objeto JSON repassado como veio. shared = pode ir pelos tokens do servidor.
-func (h *Handler) proxy(path string, max int64, shared bool) http.HandlerFunc {
+type send func(s *Service, ctx context.Context, user, method, path string, body []byte, max int64, gz bool, buf *bytes.Buffer) (bool, error)
+
+// proxy: GET sem corpo; POST com um objeto JSON repassado como veio. via: Service.search ou Service.candy (podem ir
+// pelos tokens do servidor); nil = só o token do usuário.
+func (h *Handler) proxy(path string, max int64, via send) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			h.forward(w, r, "GET", path, nil, max, shared)
+			h.forward(w, r, "GET", path, nil, max, via)
 			return
 		}
 		if body, ok := decodeObject(w, r); ok {
-			h.forward(w, r, "POST", path, body, max, shared)
+			h.forward(w, r, "POST", path, body, max, via)
 		}
 	}
 }
@@ -223,14 +229,14 @@ func decodeObject(w http.ResponseWriter, r *http.Request) (json.RawMessage, bool
 	return body, true
 }
 
-func (h *Handler) forward(w http.ResponseWriter, r *http.Request, method, path string, body []byte, max int64, shared bool) {
+func (h *Handler) forward(w http.ResponseWriter, r *http.Request, method, path string, body []byte, max int64, via send) {
 	buf := getBuf()
 	defer putBuf(buf)
 	gz := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
 	var gzipped bool
 	var err error
-	if shared {
-		gzipped, err = h.svc.search(r.Context(), httpx.User(r.Context()), method, path, body, max, gz, buf)
+	if via != nil {
+		gzipped, err = via(h.svc, r.Context(), httpx.User(r.Context()), method, path, body, max, gz, buf)
 	} else {
 		_, gzipped, err = h.svc.call(r.Context(), httpx.User(r.Context()), method, path, body, max, gz, buf)
 	}
