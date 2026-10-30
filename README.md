@@ -8,7 +8,7 @@ Go 1.27, um binário só (REST + WebSocket), PostgreSQL e Redis. TLS pelo Caddy 
 
 ## Versões
 
-### v1.2: Rare Candy
+### v1.2: Rare Candy (para o app v1.3)
 
 - **`POST /v1/pogo/rare-candy`** (`{"center_lat","center_lng","radius_km"}`): repassa a `/rare-candy/search` do PoGo
   e devolve a resposta dele como veio (`results`, `tier`, `cap`).
@@ -19,6 +19,9 @@ Go 1.27, um binário só (REST + WebSocket), PostgreSQL e Redis. TLS pelo Caddy 
 - **Limite:** 10 por minuto por usuário, separado do search.
 - **Ícone da Rare Candy:** `GET /v1/pogo/icon/it/1301.png`, o item do UICONS (`reward/item`) pelo mesmo proxy, cache e
   limites dos ícones dos Pokémon (`pm` e `u`). A fonte `it` só aceita esse arquivo.
+- **Go 1.27.3** no `go.mod` e no Dockerfile (corrige a GO-2026-6809 no `crypto/x509`).
+
+Os apps v1.2 e anteriores continuam funcionando igual com este servidor.
 
 ### v1.1: proxy do PoGo Coordinates (para o app v1.2)
 
