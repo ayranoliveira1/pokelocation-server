@@ -312,7 +312,7 @@ func TestProxy(t *testing.T) {
 		fmt.Fprintf(w, `{"method":%q,"path":%q,"body":%q}`, r.Method, r.URL.EscapedPath(), body)
 	}
 	for _, p := range []string{"POST /map/lookup", "POST /search", "GET /reveal/{code}", "GET /trainer",
-		"POST /trainer/lookup", "POST /trainer/confirm"} {
+		"POST /trainer/lookup", "POST /trainer/confirm", "POST /rare-candy/search"} {
 		up.HandleFunc(p, echo)
 	}
 	h := newHandler(t, pool, fakeUpstream(t, up))
@@ -327,6 +327,7 @@ func TestProxy(t *testing.T) {
 		{"GET", "/v1/pogo/trainer", ``, `{"method":"GET","path":"/trainer","body":""}`},
 		{"POST", "/v1/pogo/trainer/lookup", `{"trainer_code":"123456789012"}`, `{"method":"POST","path":"/trainer/lookup","body":"{\"trainer_code\":\"123456789012\"}"}`},
 		{"POST", "/v1/pogo/trainer/confirm", `{"trainer_code":"1"}`, `{"method":"POST","path":"/trainer/confirm","body":"{\"trainer_code\":\"1\"}"}`},
+		{"POST", "/v1/pogo/rare-candy", `{"center_lat":1,"center_lng":2,"radius_km":5}`, `{"method":"POST","path":"/rare-candy/search","body":"{\"center_lat\":1,\"center_lng\":2,\"radius_km\":5}"}`},
 	} {
 		w := serve(h, u, c[0], c[1], c[2])
 		if w.Code != 200 || w.Body.String() != c[3] || w.Header().Get("Content-Type") != "application/json" {
@@ -394,6 +395,23 @@ func TestRateLimit(t *testing.T) {
 	}
 	wantError(t, serve(h, u, "POST", "/v1/pogo/search", `{}`), 429, "rate_limited")
 	wantError(t, serve(h, other, "POST", "/v1/pogo/search", `{}`), 409, "pogo_relogin") // por usuário
+}
+
+func TestRateLimitCandy(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	up := http.NewServeMux()
+	up.HandleFunc("POST /rare-candy/search", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) })
+	h := newHandler(t, pool, fakeUpstream(t, up))
+	u, other := newUser(t, pool), newUser(t, pool)
+	link(t, h, u, secretTok)
+	for i := range 10 {
+		if w := serve(h, u, "POST", "/v1/pogo/rare-candy", `{}`); w.Code != 200 {
+			t.Fatalf("%d: %d", i, w.Code)
+		}
+	}
+	wantError(t, serve(h, u, "POST", "/v1/pogo/rare-candy", `{}`), 429, "rate_limited")
+	wantError(t, serve(h, other, "POST", "/v1/pogo/rare-candy", `{}`), 409, "pogo_relogin")
 }
 
 func TestProxyGzip(t *testing.T) {
