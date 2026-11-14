@@ -26,7 +26,7 @@ const (
 	defaultWorkers  = 32 // por instância: cada chamada ao PoGo leva 5–15 s (POGO_WORKERS muda)
 	maxWorkers      = 64
 	claimBatch      = 4
-	perRule         = 5 // avisos por regra a cada execução
+	perRule         = 10 // avisos por regra a cada execução
 	numResults      = 100
 	maxSeen         = 2 * time.Hour
 	unknownTTL      = time.Hour

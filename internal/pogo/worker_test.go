@@ -121,12 +121,12 @@ func TestWorker(t *testing.T) {
 	now := time.UnixMilli(time.Now().UnixMilli())
 	despawn := now.Add(10 * time.Minute)
 
-	// 8 no raio de 1 km em volta de (0,0), um a 5,5 km, um que já sumiu e um sem reveal_code
+	// perRule+3 no raio de 1 km em volta de (0,0), um a 5,5 km, um que já sumiu e um sem reveal_code
 	var near []string
-	for i := 1; i <= 8; i++ {
+	for i := 1; i <= perRule+3; i++ {
 		near = append(near, fmt.Sprintf(`{"encounter_id":"n%d","reveal_code":"rc%d","pokemon_name":"Dratini","cp":512,
 			"pokemon_id":147,"form":"Alola","costume":12,"level":30,"despawn_verified":false,
-			"iv_percent":100,"despawn_at_ms":%d,"apx_lat":%f,"apx_long":0}`, i, i, despawn.UnixMilli(), 0.001*float64(i)))
+			"iv_percent":100,"despawn_at_ms":%d,"apx_lat":%f,"apx_long":0}`, i, i, despawn.UnixMilli(), 0.0005*float64(i)))
 	}
 	near = append(near,
 		`{"encounter_id":"longe","reveal_code":"x","despawn_at_ms":`+fmt.Sprint(despawn.UnixMilli())+`,"apx_lat":0.05,"apx_long":0}`,
@@ -211,13 +211,13 @@ func TestWorker(t *testing.T) {
 		byUser[p.user] = p
 	}
 	pa := byUser[a]
-	if len(got) != 2 || pa.token != "fcm-a" || len(pa.msgs) != 6 || len(byUser[e].msgs) != 5 {
+	if len(got) != 2 || pa.token != "fcm-a" || len(pa.msgs) != perRule+1 || len(byUser[e].msgs) != perRule {
 		t.Fatalf("avisos: %+v", got)
 	}
 	first := pa.msgs[0]
 	want := map[string]string{"t": "p", "n": "Dratini", "iv": "100", "cp": "512", "d": fmt.Sprint(despawn.UnixMilli()),
 		"r": "Perto", "rc": "rc1", "e": "n1", "id": "147", "f": "Alola", "c": "12",
-		"la": "0.00100", "lo": "0.00000", "v": "0", "lv": "30"}
+		"la": "0.00050", "lo": "0.00000", "v": "0", "lv": "30"}
 	if first.Fields["h"] == "" {
 		t.Fatalf("aviso sem o id do histórico: %v", first.Fields)
 	}
@@ -225,7 +225,7 @@ func TestWorker(t *testing.T) {
 	if fmt.Sprint(first.Fields) != fmt.Sprint(want) || first.TTL != despawn.Sub(start) {
 		t.Fatalf("aviso: %+v", first)
 	}
-	gible := pa.msgs[5]
+	gible := pa.msgs[perRule]
 	for _, k := range []string{"f", "la", "lo"} {
 		if _, ok := gible.Fields[k]; ok || gible.Fields["id"] != "443" {
 			t.Fatalf("%s ausente virou campo: %v", k, gible.Fields)
@@ -280,7 +280,7 @@ func TestWorker(t *testing.T) {
 			for _, m := range p.msgs {
 				es = append(es, m.Fields["e"])
 			}
-			if strings.Join(es, ",") != "n6,n7,n8" {
+			if strings.Join(es, ",") != fmt.Sprintf("n%d,n%d,n%d", perRule+1, perRule+2, perRule+3) {
 				t.Fatalf("2ª execução de a: %v", es)
 			}
 		}
